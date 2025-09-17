@@ -23,7 +23,16 @@ def main():
     q_feats = make_qualifying_features(dfs["qualifying"])
     drv_roll, con_roll = driver_constructor_rollups(target, q_feats)
 
-    feat = target.merge(q_feats[["raceId","driverId","best_q_ms","constructorId"]], on=["raceId","driverId"], how="left")                  .merge(drv_roll, on=["raceId","driverId"], how="left")                  .merge(con_roll, on=["raceId","driverId"], how="left")
+    feat = target.merge(q_feats[["raceId","driverId","best_q_ms","constructorId"]], on=["raceId","driverId"], how="left").merge(drv_roll, on=["raceId","driverId"], how="left").merge(con_roll, on=["raceId","driverId"], how="left")
+
+    if "constructorId" not in feat.columns:
+        cx, cy = "constructorId_x", "constructorId_y"
+        if cx in feat.columns or cy in feat.columns:
+            feat["constructorId"] = feat.get(cx)
+            if cy in feat.columns:
+                feat["constructorId"] = feat["constructorId"].fillna(feat[cy])
+            
+            feat.drop(columns=[c for c in (cx, cy) if c in feat.columns], inplace=True)
 
     cat_cols = ["constructorId"]
     feat[cat_cols] = feat[cat_cols].astype("category")
