@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[project]
+name = "f1rank"
+version = "0.1.0"
+description = "F1 Race ranking model (modular)"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
