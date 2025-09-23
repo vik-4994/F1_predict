@@ -1,0 +1,21 @@
+{
+  "hidden": [
+    256,
+    128
+  ],
+  "dropout": 0.1,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "epochs": 80,
+  "val_last": 6,
+  "seed": 42,
+  "device": "cpu",
+  "in_dim": 122,
+  "best_epoch": 32,
+  "val_mean": {
+    "mae_pos": 2.8333333333333335,
+    "ndcg5": 0.906947119280428,
+    "spearman": 0.7689223057641441,
+    "top1": 0.8333333333333334
+  }
+}

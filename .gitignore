@@ -42,7 +42,7 @@ logs/
 mlruns/
 wandb/
 
-data/interim/
+data/*
 data/features/
 data/artifacts/
 data/raw/*
