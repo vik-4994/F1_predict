@@ -20,7 +20,6 @@ except Exception:  # pragma: no cover
 from .featureset import (
     FeatureScaler,
     FeatureSpec,
-    build_matrix as _build_matrix_core,
     load_feature_cols,
     select_feature_cols,
     transform_with_scaler_df,
@@ -61,8 +60,7 @@ def load_artifacts(
       - feature_cols.txt (порядок фич)
       - meta.json        (конфиг/служебная инфа)
 
-    Если `make_model` не указан, пытаемся загрузить state_dict в простой MLP (если мета содержит
-    in_dim/hidden/dropout). В противном случае можно передать свой билдер.
+    Если `make_model` не указан, собираем минимальный MLP по мета.
     """
     adir = Path(artifacts_dir)
     dev = _auto_device(device)
@@ -88,7 +86,6 @@ def load_artifacts(
 
     if _HAS_TORCH and pt_path.exists():
         if make_model is None:
-            # Пытаемся собрать минимальный MLP из меты
             in_dim = int(meta.get("in_dim", len(feature_cols)))
             hidden = list(map(int, meta.get("hidden", [256, 128])))
             dropout = float(meta.get("dropout", 0.1))
@@ -147,12 +144,19 @@ class _DefaultMLP(nn.Module):
 #                             Построение матрицы/симуляций
 # =====================================================================================
 
+def _make_meta(df: pd.DataFrame) -> Dict[str, Any]:
+    """Мини-мета как в featureset.build_matrix, но без лишних вычислений."""
+    return {
+        "drivers": df.get("Driver").tolist() if "Driver" in df.columns else None,
+        "year": int(df["year"].iloc[0]) if "year" in df.columns and len(df) else None,
+        "round": int(df["round"].iloc[0]) if "round" in df.columns and len(df) else None,
+    }
+
+
 def build_matrix(df: pd.DataFrame, artifacts: Artifacts, as_array: bool = True):
-    """Удобная обёртка над featureset.build_matrix + transform.
-    Возвращает (Xs, meta_dict) — где Xs уже отскейлен.
-    """
-    X, meta = _build_matrix_core(df, artifacts.feature_cols)
+    """featureset.transform_with_scaler_df с возвратом meta (без двойного построения X)."""
     Xs = transform_with_scaler_df(df, artifacts.feature_cols, artifacts.scaler, as_array=True)
+    meta = _make_meta(df)
     return (Xs if as_array else pd.DataFrame(Xs, columns=artifacts.feature_cols, index=df.index)), meta
 
 
@@ -277,9 +281,12 @@ def make_ranking_df(
     else:
         out = df.groupby(list(by), group_keys=False).apply(_rank_one)
 
-    # лёгкая перестановка колонок
-    lead = [*order_cols, *key_cols]
-    trail = [c for c in df.columns if c not in lead and c not in {rank_col}]
+    # лёгкая перестановка колонок (без дублей)
+    lead: List[str] = []
+    for c in [*(order_cols or []), *key_cols]:
+        if c in out.columns and c not in lead:
+            lead.append(c)
+    trail = [c for c in out.columns if c not in lead and c not in {rank_col}]
     out = out[[*lead, rank_col, *trail]].reset_index(drop=True)
     return out
 

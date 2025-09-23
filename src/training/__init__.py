@@ -124,7 +124,7 @@ __all__ = [
     "select_feature_cols", "build_matrix", "FeatureScaler", "fit_scaler_on_df",
     "transform_with_scaler_df", "fit_scaler", "transform_with_scaler",
     "get_feature_groups", "save_feature_cols", "load_feature_cols",
-    "save_scaler_json", "load_scaler_json", "FeatureMatrix", "FeatureSpec",
+    "FeatureMatrix", "FeatureSpec",
     # data_io / dataset
     "load_all", "build_train_table", "time_split", "races_list", "group_by_race",
     "RaceListDataset", "collate_races",
@@ -142,4 +142,4 @@ __all__ = [
     "count_parameters", "save_json", "load_json", "pushdir",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

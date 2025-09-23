@@ -1,4 +1,4 @@
-# FILE: src/training/engine.py
+# src/training/engine.py
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -6,16 +6,18 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Any
 import json
 import math
+import hashlib  # for feature_cols hash
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
+from .dataset import collate_races
+from torch.utils.data import DataLoader
 
 from .losses import PlackettLuceLoss, plackett_luce_nll
 from .metrics import metrics_for_race, aggregate_metrics
 from .featureset import FeatureScaler, save_feature_cols, load_feature_cols
-
 
 # -------------------------
 # Core train/eval routines
@@ -27,45 +29,37 @@ def _forward_scores(model: nn.Module, X: torch.Tensor, device: str = "cpu") -> t
     return model(X.to(device))
 
 
-def train_one_epoch(
-    model: nn.Module,
-    dataset: Dataset,
-    optimizer: torch.optim.Optimizer,
-    device: str = "cpu",
-    loss_fn: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-    grad_clip: float = 2.0,
-    shuffle: bool = True,
-) -> float:
-    """
-    Одну эпоху обходим гонки (1 элемент датасета = 1 гонка).
-    Возвращает суммарный NLL по эпохе.
-    """
+def train_one_epoch(model, dataset, optimizer, device="cpu", batch_size: int = 1, shuffle: bool = True):
     model.train()
-    if loss_fn is None:
-        # лист-вайз по всему списку (вся гонка)
-        def loss_fn(scores: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
-            return plackett_luce_nll(scores, order)
+    dl = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_races)
+    loss_fn = PlackettLuceLoss()
+    running = 0.0
+    n = 0
 
-    order_idx = np.random.permutation(len(dataset)) if shuffle else np.arange(len(dataset))
-    total_loss = 0.0
+    for races in dl:  # collate возвращает список гонок
+        for item in races:
+            X = torch.as_tensor(item["X"], dtype=torch.float32, device=device)
+            order = torch.as_tensor(item["order"], dtype=torch.long, device=device)
 
-    for idx in order_idx:
-        item = dataset[idx]
-        X: torch.Tensor = item["X"].to(device)         # [N,F]
-        order = item["order"].to(device)               # [N]
+            optimizer.zero_grad(set_to_none=True)
 
-        scores = model(X)                              # [N]
-        loss = loss_fn(scores, order)
+            # ВАЖНО: никаких in-place с outputs!
+            scores = model(X)                 # (N,)
+            loss = loss_fn(scores, order)     # только чистые функциональные операции
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if grad_clip and grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
 
-        total_loss += float(loss.item())
+            running += float(loss.detach().cpu())
+            n += 1
 
-    return total_loss
+            # Если хотите посчитать метрики на train — делайте это только на detached-копии
+            # и под no_grad(), и НИЧЕГО in-place:
+            # with torch.no_grad():
+            #     pred_order = torch.argsort(scores.detach(), descending=True)
+            #     _ = metrics_for_race(scores.detach(), order)
+
+    return running / max(n, 1)
 
 
 @torch.no_grad()
@@ -108,6 +102,14 @@ def evaluate(
 # Checkpointing / artifacts
 # -------------------------
 
+def _sha1_of_list(xs: List[str]) -> str:
+    h = hashlib.sha1()
+    for s in xs:
+        h.update(s.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def save_checkpoint(
     artifacts_dir: Path,
     model: nn.Module,
@@ -135,11 +137,26 @@ def save_checkpoint(
     save_feature_cols(adir / "feature_cols.txt", feature_cols)
 
     # метаданные
-    meta = dict(meta or {})
-    # полезно записать in_dim, чтобы при загрузке проверить совместимость
-    meta.setdefault("in_dim", int(len(feature_cols)))
+    meta_out: Dict[str, Any] = dict(meta or {})
+    # полезные поля по умолчанию
+    meta_out.setdefault("in_dim", int(len(feature_cols)))
+    meta_out.setdefault("num_features", int(len(feature_cols)))
+    meta_out.setdefault("feature_cols_sha1", _sha1_of_list(list(feature_cols)))
+    # число параметров модели (для контроля совместимости)
+    try:
+        meta_out.setdefault("num_params", int(sum(p.numel() for p in model.parameters())))
+    except Exception:
+        pass
+    # если модель содержит подсказки по конфигу — сохраним
+    for k in ("hidden", "dropout"):
+        if k not in meta_out and hasattr(model, k):
+            try:
+                meta_out[k] = getattr(model, k)
+            except Exception:
+                pass
+
     with open(adir / "meta.json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(meta_out, f, indent=2)
 
 
 def load_checkpoint(

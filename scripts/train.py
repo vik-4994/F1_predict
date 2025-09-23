@@ -7,6 +7,7 @@ import json
 from typing import List, Sequence
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -75,18 +76,16 @@ def main() -> None:
     nva = VA[["year", "round"]].drop_duplicates().shape[0]
     log(f"Train races: {ntr} | Val races: {nva}")
 
-    # 4) выбор признаков и скейлинг по train; важно сохранить мета-колонки в TR/VA
+    # 4) выбор признаков и скейлинг по train
     feature_cols = select_feature_cols(TR)
     scaler = fit_scaler_on_df(TR, feature_cols)
 
-    TR_scaled = transform_with_scaler_df(TR, feature_cols, scaler, as_array=False)
-    VA_scaled = transform_with_scaler_df(VA, feature_cols, scaler, as_array=False)
+    TR_scaled = transform_with_scaler_df(TR, feature_cols, scaler, as_array=False).astype("float32")
+    VA_scaled = transform_with_scaler_df(VA, feature_cols, scaler, as_array=False).astype("float32")
 
-    # не теряем мета-колонки — кладём отскейленные признаки обратно в копии TR/VA
-    TRn = TR.copy()
-    VAn = VA.copy()
-    TRn.loc[:, feature_cols] = TR_scaled.values
-    VAn.loc[:, feature_cols] = VA_scaled.values
+    # важный момент: не переписываем inplace колонки Int64 — просто подменяем блок фич float32
+    TRn = pd.concat([TR.drop(columns=feature_cols), TR_scaled], axis=1)
+    VAn = pd.concat([VA.drop(columns=feature_cols), VA_scaled], axis=1)
 
     # 5) датасеты (1 элемент = 1 гонка)
     tr_ds = RaceListDataset(TRn, feature_cols=feature_cols, dnf_position=cfg.dnf_position)

@@ -6,84 +6,74 @@ import torch
 import torch.nn as nn
 
 
+def _ensure_1d(x: torch.Tensor) -> torch.Tensor:
+    # reshape, а не view: работает корректно и для не-contiguous
+    if x.dim() != 1:
+        x = x.reshape(-1)
+    return x
+
+
 @torch.jit.script
-def _pl_cumlogsumexp(sorted_scores: torch.Tensor) -> torch.Tensor:
+def _suffix_logsumexp(s: torch.Tensor) -> torch.Tensor:
     """
-    Cumulative logsumexp from the tail: for s[k:] compute logsumexp(s[k:]).
-    sorted_scores: [N] (scores already permuted in observed order: winner first)
-    Returns: [N] tensor with denom_k = logsumexp(s[k:])
+    Для каждого k вернуть logsumexp(s[k:]).
+    Реализация без in-place через logcumsumexp по перевёрнутому вектору.
     """
-    # numerical stability: subtract max
-    s = sorted_scores
-    maxv = torch.max(s)
-    se = torch.exp(s - maxv)
-    # cumulative sum from end, then log and add max back
-    cumsum_rev = torch.flip(torch.cumsum(torch.flip(se, dims=[0]), dim=0), dims=[0])
-    return torch.log(cumsum_rev) + maxv
+    # вычитаем максимум для численной устойчивости
+    m = torch.max(s)
+    st = s - m
+    # лог-сумма от хвоста: flip -> logcumsumexp -> flip назад
+    rev = torch.logcumsumexp(st.flip(0), dim=0).flip(0)
+    return rev + m
 
 
+@torch.jit.script
 def plackett_luce_nll(scores: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
     """
-    Plackett–Luce negative log-likelihood for a single list (one race).
-
-    Args:
-        scores: [N] real-valued scores (higher = better rank)
-        order:  [N] indices giving observed order, winner first (0..N-1)
-
-    Returns:
-        Scalar tensor: NLL = -sum_k log( exp(s[π_k]) / sum_{j>=k} exp(s[π_j]) )
-                     = sum_k (logsumexp(s[k:]) - s[k]) in the observed order
+    Полный PL-NLL: sum_k [logsumexp(s[k:]) - s[k]] в наблюдённом порядке.
+    scores: (N,) или (N,1)
+    order:  (N,) long — индексы от победителя к последнему
     """
-    s = scores[order]                     # [N], reorder so true winner is first
-    denom = _pl_cumlogsumexp(s)           # [N]
-    return torch.sum(denom - s)
+    scores = _ensure_1d(scores).contiguous()
+    order = _ensure_1d(order).to(dtype=torch.long).contiguous()
+
+    # переставляем скоры в наблюдённый порядок (winner-first)
+    s = scores.gather(0, order)             # (N,)
+    denom = _suffix_logsumexp(s)            # (N,)
+    nll = denom - s
+    return nll.sum()
 
 
-def plackett_luce_topk_nll(scores: torch.Tensor, order: torch.Tensor, k: int) -> torch.Tensor:
+@torch.jit.script
+def plackett_luce_topk_nll(scores: torch.Tensor, order: torch.Tensor, topk: int) -> torch.Tensor:
     """
-    Top-K variant of PL-NLL: учитывает только первые k мест (k<=N).
-    Полезно, если важнее верх списка.
+    PL-NLL только для первых K позиций (leaderboard@K).
     """
-    s = scores[order]
-    k = int(min(max(k, 1), s.numel()))
-    denom = _pl_cumlogsumexp(s)
-    return torch.sum(denom[:k] - s[:k])
+    scores = _ensure_1d(scores).contiguous()
+    order = _ensure_1d(order).to(dtype=torch.long).contiguous()
+
+    s = scores.gather(0, order)             # (N,)
+    denom = _suffix_logsumexp(s)            # (N,)
+    k = min(int(topk), s.size(0))
+    nll = denom[:k] - s[:k]
+    return nll.sum()
 
 
-def listmle_nll(scores: torch.Tensor, order: torch.Tensor, jitter: float = 0.0) -> torch.Tensor:
+@torch.jit.script
+def listmle_nll(scores: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
     """
-    ListMLE (Cao et al., 2007), реализован через тот же рецепт, что и PL.
-    При 'order' = наблюдаемому порядку победителей, совпадает с PL-NLL.
-
-    Args:
-        scores: [N]
-        order:  [N] winner-first
-        jitter: добавляет N(0, jitter) к scores для tie-breaking (0 = выкл)
-
-    Returns:
-        Scalar NLL
+    Классический ListMLE по наблюдённой перестановке — формула совпадает с PL.
+    Оставляем отдельной функцией для ясности API.
     """
-    s = scores
-    if jitter > 0:
-        s = s + torch.randn_like(s) * jitter
-    return plackett_luce_nll(s, order)
+    return plackett_luce_nll(scores, order)
 
 
 class PlackettLuceLoss(nn.Module):
-    """nn.Module-обёртка над plackett_luce_nll (удобно для оптимайзера/логгера)."""
-    def __init__(self, topk: Optional[int] = None):
+    def __init__(self, topk: Optional[int] = None) -> None:
         super().__init__()
         self.topk = topk
 
     def forward(self, scores: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
         if self.topk is None:
             return plackett_luce_nll(scores, order)
-        return plackett_luce_topk_nll(scores, order, self.topk)
-
-
-__all__ = [
-    "plackett_luce_nll",
-    "plackett_luce_topk_nll",
-    "listmle_nll",
-    "PlackettLuceLoss",
-]
+        return plackett_luce_topk_nll(scores, order, int(self.topk))

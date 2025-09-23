@@ -1,13 +1,19 @@
-# FILE: src/training/dataset.py
+# src/training/dataset.py
 from __future__ import annotations
 
 from typing import List, Dict, Optional, Tuple
+
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .featureset import select_feature_cols, build_matrix
+from .featureset import (
+    select_feature_cols,
+    build_matrix,
+    transform_with_scaler_df,
+    FeatureScaler,
+)
 
 KEY = ["Driver", "year", "round"]
 
@@ -18,61 +24,73 @@ def _finish_pos_eff(df: pd.DataFrame, dnf_position: int = 21) -> pd.Series:
     status = df.get("Status")
     if status is not None:
         status = status.astype(str)
-        finished = status.str.contains("Finished", case=False, na=False) | status.str.contains("Plus", case=False, na=False)
+        finished = status.str.contains("Finished", case=False, na=False) | status.str.contains(
+            "Plus", case=False, na=False
+        )
         return pd.Series(np.where(finished, pos, float(dnf_position)), index=df.index)
     return pos
 
 
 class RaceListDataset(Dataset):
     """
-    Один элемент = одна гонка.
-    На вход: таблица с фичами и таргетами (inner-join по Driver/year/round), желательно с finish_pos_eff.
-    Если finish_pos_eff нет — посчитаем локально.
+    Один элемент датасета = одна гонка.
+    На вход: объединённая таблица с фичами и таргетами (inner-join по Driver/year/round).
+    Если 'finish_pos_eff' нет — посчитаем локально из finish_position/Status.
+    При наличии scaler: применяем тот же препроцесс, что и на инференсе.
     """
+
     def __init__(
         self,
         df_joined: pd.DataFrame,
         feature_cols: Optional[List[str]] = None,
         dnf_position: int = 21,
+        scaler: Optional[FeatureScaler] = None,
+        min_drivers_per_race: int = 2,
     ):
         if df_joined is None or df_joined.empty:
             raise ValueError("RaceListDataset: empty input DataFrame")
 
         df = df_joined.copy()
 
-        # ключи к строковым/интовым типам
+        # нормализуем ключи типов
+        if "Driver" not in df.columns:
+            raise ValueError("RaceListDataset: 'Driver' column is required")
         df["Driver"] = df["Driver"].astype(str)
-        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype(int)
-        df["round"] = pd.to_numeric(df["round"], errors="coerce").astype(int)
+        for k in ("year", "round"):
+            if k not in df.columns:
+                raise ValueError(f"RaceListDataset: '{k}' column is required")
+            df[k] = pd.to_numeric(df[k], errors="coerce").astype(int)
+
+        # удалим дубли по ключу гонки/пилота (если есть)
+        df = df.drop_duplicates(subset=KEY, keep="last").reset_index(drop=True)
 
         # таргет: эффективная позиция
         if "finish_pos_eff" not in df.columns:
             df["finish_pos_eff"] = _finish_pos_eff(df, dnf_position=dnf_position)
 
-        # выберем фичи
+        # список фич
         if feature_cols is None:
             feature_cols = select_feature_cols(df)
-        self.feature_cols: List[str] = list(feature_cols)
+        else:
+            # защита от утечки: исключим finish_pos_eff, даже если передали вручную
+            feature_cols = [c for c in feature_cols if c != "finish_pos_eff"]
 
-        # валидные строки (все фичи существуют и хотя бы одна не NaN)
-        keep_mask = np.ones(len(df), dtype=bool)
-        for c in self.feature_cols:
+        # добавим отсутствующие колонки (заполнит скейлер средними)
+        for c in feature_cols:
             if c not in df.columns:
-                df[c] = np.nan  # добавим отсутствующие (заполнит скейлер потом)
-        # выкидывать ничего не будем здесь; импьютация будет в скейлере
+                df[c] = np.nan
 
-        df = df.loc[keep_mask]
+        self.feature_cols: List[str] = list(feature_cols)
+        self.scaler: Optional[FeatureScaler] = scaler
 
-        # группировка по гонкам
+        # группировка по гонкам (минимум 2 пилота)
         groups: List[pd.DataFrame] = []
         for (y, r), g in df.groupby(["year", "round"], sort=True):
             g = g.sort_values("Driver").reset_index(drop=True)
-            # если в гонке <2 пилотов, в обучении смысла нет — пропустим
-            if g.shape[0] < 2:
-                continue
-            groups.append(g)
+            if g.shape[0] >= int(min_drivers_per_race):
+                groups.append(g)
         if not groups:
-            raise ValueError("RaceListDataset: no races with >=2 drivers")
+            raise ValueError(f"RaceListDataset: no races with >={min_drivers_per_race} drivers")
 
         self.groups = groups
 
@@ -81,18 +99,23 @@ class RaceListDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         g = self.groups[idx]
+
         # матрица признаков
-        X, _ = build_matrix(g, self.feature_cols)  # [N,F]
+        if self.scaler is None:
+            X, _ = build_matrix(g, self.feature_cols)  # [N,F] без скейлинга
+        else:
+            X = transform_with_scaler_df(g, self.feature_cols, self.scaler, as_array=True)  # [N,F] scaled
+
         # наблюдаемый порядок (победитель первым)
         order = np.argsort(g["finish_pos_eff"].to_numpy(dtype=np.float32))  # [N]
-        item = {
-            "X": torch.from_numpy(X.astype(np.float32)),                   # [N,F]
-            "order": torch.from_numpy(order.astype(np.int64)),             # [N]
+
+        return {
+            "X": torch.from_numpy(X.astype(np.float32)),  # [N,F]
+            "order": torch.from_numpy(order.astype(np.int64)),  # [N]
             "drivers": g["Driver"].tolist(),
             "year": int(g["year"].iloc[0]),
             "round": int(g["round"].iloc[0]),
         }
-        return item
 
     # удобные аксессоры
     @property

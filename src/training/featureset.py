@@ -50,17 +50,19 @@ __all__ = [
 
 _KEY = ["Driver", "year", "round"]
 
-# Columns we must never feed to the ranker
+# Columns we must never feed to the ranker (targets/metadata/post-factum)
 _BLACKLIST = {
     # keys / identifiers
     "year", "round",
     # explicit targets / leaks
     "finish_position", "finish_pos", "finish_order", "position", "place",
+    "finish_pos_eff",  # computed effective target — must be excluded
+    # post-factum / outcome-like fields
     "Points", "GridPosition", "Status", "Time",
 }
 
 # extra prefixes we proactively treat as numeric even if dtype=object
-# based on your pre-race modules
+# based on pre-race feature modules
 _OBJECT_NUMERIC_PREFIXES: Tuple[str, ...] = (
     # driver/team priors
     "driver_team_pre_",
@@ -224,15 +226,20 @@ class FeatureScaler:
 
 
 def fit_scaler_on_df(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureScaler:
+    """
+    Fit the standardization stats on a training dataframe.
+    Robustly handles NaNs/Infs and near-zero variance.
+    """
     d = _ensure_columns(df, feature_cols)
     d = _coerce_object_featurelike(d)
     X = d.loc[:, list(feature_cols)].to_numpy(dtype=np.float32, copy=False)
     mean = np.nanmean(X, axis=0)
     std = np.nanstd(X, axis=0)
-    # imputing stats: replace NaNs in mean/std with 0/1 respectively
+    # replace non-finite stats with safe constants
     mean = np.where(np.isfinite(mean), mean, 0.0).astype(np.float32)
-    std = np.where(np.isfinite(std), 1.0 if False else std, std)  # keep as computed
-    std = np.where(std < 1e-6, 1.0, std)
+    std = np.where(np.isfinite(std), std, 1.0).astype(np.float32)
+    # guard against tiny variance
+    std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
     return FeatureScaler(mean=mean, std=std, eps=1e-6)
 
 
@@ -270,8 +277,10 @@ def save_feature_cols(path: Path | str, feature_cols: Sequence[str]):
 
 
 def load_feature_cols(path: Path | str) -> List[str]:
+    """Load feature column list from a text file (one per line)."""
     with open(path, "r", encoding="utf-8") as f:
-        cols = [line.rstrip("") for line in f]
+        # rstrip("") is invalid; use rstrip() to drop trailing newline/space
+        cols = [line.rstrip() for line in f]
     # drop empties, preserve order
     return [c for c in cols if c]
 

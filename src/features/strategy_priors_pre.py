@@ -290,6 +290,42 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
                 return laps[c].astype(str).dropna().drop_duplicates().tolist()
     return []
 
+
+def _double_stack_risks(raw_dir: Path, y: int, r: int, stack_window: int, min_first_stop_lap: int) -> pd.DataFrame:
+    pit = _load_pit_stops(raw_dir, y, r)
+    if pit.empty:
+        return pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
+
+    d2t = _driver_team_map(raw_dir, y, r)
+    if d2t.empty or 'Driver' not in pit.columns:
+        return pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
+
+    # первый пит каждого пилота (после разумного минимума)
+    first = pit.dropna(subset=['Driver','lap']).copy()
+    first['lap'] = pd.to_numeric(first['lap'], errors='coerce').astype('Int64')
+    first = first.dropna(subset=['lap'])
+    first = first.groupby('Driver', as_index=False)['lap'].min().rename(columns={'lap':'first_stop_lap'})
+    first = first[first['first_stop_lap'] >= int(min_first_stop_lap)]
+
+    df = first.merge(d2t, on='Driver', how='left').dropna(subset=['Team'])
+    if df.empty:
+        return pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
+
+    # по командам: вероятность, что два пилота остановились в один круг (same_lap)
+    # и в пределах ±stack_window кругов (stacked)
+    rows = []
+    for tm, g in df.groupby('Team'):
+        laps = sorted(pd.to_numeric(g['first_stop_lap'], errors='coerce').dropna().astype(int).tolist())
+        if len(laps) < 2:
+            rows.append({'Team': tm, 'double_stack_risk': 0.0, 'double_stack_same_lap': 0.0})
+            continue
+        a, b = laps[0], laps[1]
+        same = float(a == b)
+        near = float(abs(a - b) <= int(stack_window))
+        rows.append({'Team': tm, 'double_stack_risk': near, 'double_stack_same_lap': same})
+    return pd.DataFrame(rows)
+
+
 # ----------------------------- main -----------------------------
 
 def featurize(ctx: dict) -> pd.DataFrame:
