@@ -334,6 +334,18 @@ class InferenceRunner:
 
     def rank(self, df: pd.DataFrame, temperature: Optional[float] = None, by: Sequence[str] = ("year", "round"), include_probs: bool = True, ascending: bool = False) -> pd.DataFrame:
         return predict_custom(self.artifacts, df, temperature=temperature, by=by, include_probs=include_probs, ascending=ascending)
+    
+    # -----------------------------
+    # Back-compat helpers (旧 API)
+    # -----------------------------
+    @property
+    def feature_columns(self) -> List[str]:
+        """Совместимость со старыми скриптами: alias на artifacts.feature_cols."""
+        return list(self.artifacts.feature_cols)
+
+    def predict_scores(self, df: pd.DataFrame) -> np.ndarray:
+        """Совместимость со старыми скриптами: alias на predict_scores(...)."""
+        return predict_scores(self.artifacts, df)
 
 
 # =====================================================================================

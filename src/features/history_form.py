@@ -168,6 +168,22 @@ def _last_known_team_map(raw_dir: Path, past: List[Tuple[int, int]]) -> pd.DataF
     last = hist.groupby("Driver", as_index=False).tail(1)[["Driver", "Team"]]
     return last.reset_index(drop=True)
 
+def _is_green_flag(df: pd.DataFrame) -> pd.Series:
+    # FastF1/официальные логи: TrackStatus == '1' означает зелёный
+    if "TrackStatus" in df.columns:
+        ts = df["TrackStatus"].astype(str).str.strip()
+        return ts.isin({"1", 1})
+    # Если есть явные флаги — считаем зелёным, где ни один не активен
+    for c in ("SC", "VSC", "YellowFlag", "FullCourseYellow"):
+        if c in df.columns:
+            any_flag = pd.Series(False, index=df.index)
+            for cc in ("SC", "VSC", "YellowFlag", "FullCourseYellow"):
+                if cc in df.columns:
+                    any_flag |= df[cc].astype(bool)
+            return ~any_flag
+    # иначе считаем все круги зелёными
+    return pd.Series(True, index=df.index)
+
 # --------- метрики круга (PACE) из laps ---------
 def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     p = raw_dir / f"laps_{y}_{r}.csv"
@@ -187,10 +203,20 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     df["LapTime_s"] = _to_seconds(df[tcol])
 
     # исключаем пит-ин/аут, если есть флаги
-    for flag_col in ("IsPitIn", "IsPitOut", "PitIn", "PitOut"):
-        if flag_col not in df.columns:
-            df[flag_col] = False
-    df = df[(~df["IsPitIn"]) & (~df["IsPitOut"]) & (~df["PitIn"]) & (~df["PitOut"])].copy()
+    is_pit = pd.Series(False, index=df.index)
+    for c in ("IsPitIn", "IsPitOut", "PitIn", "PitOut", "InPit", "OutPit"):
+        if c in df.columns:
+            is_pit |= df[c].astype(bool)
+    for c in ("PitInTime", "PitOutTime"):
+        if c in df.columns:
+            is_pit |= pd.to_datetime(df[c], errors="coerce").notna()
+    df = df[~is_pit].copy()
+
+    green = _is_green_flag(df)
+    df = df[green].copy()
+
+    df["LapTime_s"] = pd.to_numeric(df["LapTime_s"], errors="coerce")
+    df = df[df["LapTime_s"] > 0]
 
     rows = []
     for drv, sub in df.groupby("Driver"):
@@ -208,8 +234,22 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             clean_share = np.nan
         val10 = clean.nsmallest(10)
         best10_mean = float(val10.mean()) if len(val10) else np.nan
-        rows.append({"Driver": drv, "best10_mean_s": best10_mean, "clean_share": clean_share})
-    return pd.DataFrame(rows)
+        rows.append({
+            "Driver": drv,
+            "best10_mean_s": best10_mean,
+            "clean_share": clean_share,
+            "laps_n": int(s.size),
+            "clean_n": int(clean.size) if len(s) >= 3 else int(s.size)
+        })
+    out = pd.DataFrame(rows)
+    # race-level detrend для pace: вычитаем медиану best10_mean_s по пилотам
+    pace_med = float(out["best10_mean_s"].median(skipna=True)) if not out.empty else np.nan
+    out["best10_rel_s"] = out["best10_mean_s"] - pace_med
+
+    # race-level detrend: вычитаем медиану по пелотону
+    race_med = float(out["clean_share"].median(skipna=True)) if not out.empty else np.nan
+    out["clean_share_detrended"] = out["clean_share"] - race_med
+    return out
 
 # --------- DNF по results ---------
 def _dnf_table_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
@@ -250,22 +290,34 @@ def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd
         ])
     else:
         def _agg(g: pd.DataFrame) -> pd.Series:
-            vals = pd.to_numeric(g["best10_mean_s"], errors="coerce").dropna()
-            share = pd.to_numeric(g["clean_share"], errors="coerce")
+            vals = pd.to_numeric(g["best10_rel_s"], errors="coerce").dropna()
             p50 = float(np.nanmedian(vals)) if len(vals) else np.nan
             q25 = np.nanpercentile(vals, 25) if len(vals) else np.nan
             q75 = np.nanpercentile(vals, 75) if len(vals) else np.nan
             iqr = float(q75 - q25) if np.isfinite(q75) and np.isfinite(q25) else np.nan
-            cmean = float(share.mean()) if share.notna().any() else np.nan
+
+            cln = pd.to_numeric(g.get("clean_n"), errors="coerce").fillna(0.0)
+            tot = pd.to_numeric(g.get("laps_n"),  errors="coerce").fillna(0.0)
+            rel = pd.to_numeric(g.get("clean_share_detrended"), errors="coerce")
+
+            if np.isfinite(rel).any() and (tot.sum() > 0):
+                cmean = float(np.nansum(rel * tot) / tot.sum())
+            else:
+                cmean = float(np.nan)
+
             last = g.sort_values(["year", "round"]).tail(1)[["year", "round"]].iloc[0] if not g.empty else {"year": pd.NA, "round": pd.NA}
             return pd.Series({
                 "hist_pre_hist_n": int(g.shape[0]),
-                "hist_pre_best10_pace_p50_s": p50,
-                "hist_pre_best10_pace_iqr_s": iqr,
+                "hist_pre_best10_pace_p50_s": float(np.nanmedian(vals)) if len(vals) else np.nan,
+                "hist_pre_best10_pace_iqr_s": (
+                    float(np.nanpercentile(vals, 75) - np.nanpercentile(vals, 25))
+                    if len(vals) else np.nan
+                ),
                 "hist_pre_clean_share_mean": cmean,
                 "hist_pre_last_seen_year": int(last["year"]) if pd.notna(last["year"]) else pd.NA,
                 "hist_pre_last_seen_round": int(last["round"]) if pd.notna(last["round"]) else pd.NA,
             })
+
         pace_agg = pace.groupby("Driver", dropna=False).apply(_agg).reset_index()
 
     if dnfs is None or dnfs.empty:

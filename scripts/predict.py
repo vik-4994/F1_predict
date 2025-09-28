@@ -1,420 +1,328 @@
-#!/usr/bin/env python3
-# scripts/predict.py — удобный предикт: вероятность победы в %, сортировка по позициям
+# scripts/predict.py
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
-
+from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
+import torch
 
-from src.training import InferenceRunner, log
+pd.set_option("mode.copy_on_write", True)
 
-# =====================================================================================
-#                                         utils
-# =====================================================================================
+# наш раннер инференса (см. .from_dir/.rank)
+from src.training.inference import InferenceRunner  # :contentReference[oaicite:1]{index=1}
 
-def _slugify(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"[^\w]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s or "unknown"
+ALPHA_NUM = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+def _load_artifact_scaler(artifacts_dir: Path):
+    """Пытаемся достать mean/std из артефактов (scaler.json)."""
+    import json
+    sj = Path(artifacts_dir) / "scaler.json"
+    if not sj.exists(): return None
+    with open(sj, "r") as f:
+        obj = json.load(f)
+    # ожидаем форматы {'mean': [...], 'std': [...], 'feature_cols': [...] } или отдельно feature_cols.txt
+    return obj
 
-def _read_table(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    if path.suffix.lower() in (".parquet", ".pq"):
-        return pd.read_parquet(path)
-    return pd.read_csv(path)
-
-
-def _load_all_features(features_path: Path) -> pd.DataFrame:
-    p = Path(features_path)
-    if p.is_dir():
-        ap = p / "all_features.parquet"
-        if ap.exists():
-            return _read_table(ap)
-        ap_csv = ap.with_suffix(".csv")
-        return _read_table(ap_csv)
-    return _read_table(p)
+def _to_tensor(X: np.ndarray, device=None):
+    if device is None:
+        device = "cpu"
+    return torch.tensor(X, dtype=torch.float32, device=device, requires_grad=True)
 
 
-def _parse_drivers(arg: str) -> List[str]:
-    return [x.strip() for x in arg.split(",") if x.strip()]
 
-
-def _load_lineup(lineup_path: Optional[str], drivers_arg: Optional[str]) -> List[str]:
-    if lineup_path:
-        p = Path(lineup_path)
-        if not p.exists():
-            raise FileNotFoundError(f"lineup file not found: {p}")
-        if p.suffix.lower() in (".yaml", ".yml"):
-            try:
-                import yaml  # type: ignore
-            except Exception as e:
-                raise RuntimeError("PyYAML is required for .yaml lineup; install: pip install pyyaml") from e
-            data = yaml.safe_load(p.read_text(encoding="utf-8"))
-        else:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        seq = data["drivers"] if isinstance(data, dict) and "drivers" in data else data
-        return [str(x).strip() for x in seq if str(x).strip()]
-    if drivers_arg:
-        return _parse_drivers(drivers_arg)
-    raise ValueError("Provide --lineup FILE.(json|yaml) or --drivers 'VER,PER,...'")
-
-
-def _ensure_feature_columns(df: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataFrame:
-    out = df.copy()
-    for c in feature_cols:
-        if c not in out.columns:
-            out[c] = np.nan
-    return out
-
-
-# =====================================================================================
-#                          weather & track overrides (robust)
-# =====================================================================================
-
-_WEATHER_MAP: List[Tuple[str, Tuple[str, ...]]] = [
-    ("airtemp", ("weather_pre_air_temp_mean", "temp_air", "weather_air_temp")),
-    ("tracktemp", ("weather_pre_track_temp_mean", "temp_track", "weather_track_temp")),
-    ("humidity", ("weather_pre_humidity_mean", "humidity")),
-    ("windspeed", ("weather_pre_wind_kph_mean", "wind_speed", "wind_kph")),
-    ("winddirection", ("weather_pre_wind_dir_mean", "wind_dir")),
-]
-
-
-def _override_weather(df: pd.DataFrame, weather_json: Optional[str]) -> pd.DataFrame:
-    if not weather_json:
-        return df
+def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
+                     drivers: List[str], temperature: float = 1.2, topn: int = 10):
+    """
+    Печатает по каждому драйверу:
+      [A] top |z-score| признаков (после стандартизации скейлером артефактов)
+      [B] top grad*input (локальная важность)
+      [C] top Δscore, если фичу прибить к среднему (what-if)
+    """
+    import sys
+    import numpy as np
     try:
-        vals_in = json.loads(weather_json)
-    except Exception as e:
-        log(f"⚠️  Bad --weather-json: {e}")
-        return df
-
-    norm: Dict[str, float] = {}
-    for k, v in vals_in.items():
-        k2 = _slugify(str(k)).replace("_", "")
-        try:
-            norm[k2] = float(v)
-        except Exception:
-            pass
-
-    out = df.copy()
-    for key, candidates in _WEATHER_MAP:
-        if key not in norm:
-            continue
-        val = norm[key]
-        for col in candidates:
-            if col in out.columns:
-                out.loc[:, col] = val
-    return out
-
-
-def _override_track(df: pd.DataFrame, track_name: Optional[str], feature_cols: Sequence[str]) -> Tuple[pd.DataFrame, Optional[str]]:
-    if not track_name:
-        return df, None
-    slug = _slugify(track_name)
-    out = df.copy()
-
-    track_cols = [c for c in feature_cols if c.startswith("track_is_")]
-    for c in track_cols:
-        if c in out.columns:
-            out.loc[:, c] = 0.0
-
-    chosen = f"track_is_{slug}"
-    if chosen in feature_cols:
-        if chosen not in out.columns:
-            out[chosen] = 0.0
-        out.loc[:, chosen] = 1.0
-        return out, chosen
-    else:
-        print(f"[warn] track column '{chosen}' отсутствует в feature_cols — модель обучалась без этого трека", file=sys.stderr)
-        if chosen not in out.columns:
-            out[chosen] = 1.0
-        else:
-            out.loc[:, chosen] = 1.0
-        return out, None
-
-
-# =====================================================================================
-#                       custom features (track-aware improvements)
-# =====================================================================================
-
-def _make_custom_features(
-    allF: pd.DataFrame,
-    drivers: List[str],
-    history_window: int,
-    sim_year: int,
-    sim_round: int,
-) -> pd.DataFrame:
-    if allF.empty:
-        raise RuntimeError("all_features is empty; provide --features pointing to all_features(.parquet/.csv) or its folder")
-
-    allF = allF.copy()
-    allF["Driver"] = allF["Driver"].astype(str)
-
-    parts = []
-    for drv in drivers:
-        hist = allF[allF["Driver"] == drv].sort_values(["year", "round"])
-        if hist.empty:
-            parts.append(pd.DataFrame({"Driver": [drv], "year": [sim_year], "round": [sim_round]}))
-            continue
-        tail = hist.tail(history_window)
-        num_cols = [c for c in tail.columns if pd.api.types.is_numeric_dtype(tail[c])]
-        prof = tail[num_cols].mean(numeric_only=True).to_frame().T
-        prof["Driver"] = drv
-        prof["year"] = sim_year
-        prof["round"] = sim_round
-        parts.append(prof)
-    df = pd.concat(parts, ignore_index=True, sort=False)
-    for col in ("year", "round"):
-        if col not in df.columns:
-            df[col] = sim_year if col == "year" else sim_round
-    return df
-
-
-def _inject_track_same_features(
-    df_custom: pd.DataFrame,
-    allF: pd.DataFrame,
-    chosen_track_col: Optional[str],
-    feature_cols: Sequence[str],
-    driver_col: str = "Driver",
-) -> pd.DataFrame:
-    if not chosen_track_col or chosen_track_col not in allF.columns:
-        return df_custom
-
-    out = df_custom.copy()
-    need = [c for c in feature_cols if c.startswith("track_same_")]
-    if not need:
-        return out
-
-    allF2 = allF[allF[chosen_track_col] == 1].copy()
-    if allF2.empty:
-        return out
-
-    allF2 = allF2.sort_values([driver_col, "year", "round"]).drop_duplicates([driver_col], keep="last")
-    cols = [driver_col, *[c for c in need if c in allF2.columns]]
-    have = allF2[cols].set_index(driver_col)
-
-    for i, row in out.iterrows():
-        drv = str(row.get(driver_col, ""))
-        if drv in have.index:
-            for c in have.columns:
-                if c in out.columns:
-                    out.at[i, c] = have.at[drv, c]
-    return out
-
-
-# =====================================================================================
-#                           sorting & pretty printing helpers
-# =====================================================================================
-
-def _finalize_for_output(df: pd.DataFrame, sort_by: str) -> pd.DataFrame:
-    d = df.copy()
-    if "rank" in d.columns:
-        try:
-            d["pos"] = d["rank"].astype(int)
-        except Exception:
-            d["pos"] = d["rank"]
-    if "p_win" in d.columns:
-        d["p_win_%"] = (d["p_win"] * 100.0).map(lambda x: f"{x:.1f}%")
-    if sort_by == "rank":
-        if {"year", "round", "rank"}.issubset(d.columns):
-            d = d.sort_values(["year", "round", "rank", "Driver"])  # race-mode
-        else:
-            d = d.sort_values(["rank", "Driver"])  # custom-mode
-    elif sort_by == "p_win":
-        d = d.sort_values(["p_win", "score"], ascending=[False, False])
-    elif sort_by == "score":
-        d = d.sort_values(["score"], ascending=False)
-    return d.reset_index(drop=True)
-
-
-def _choose_columns(df: pd.DataFrame, mode: str) -> List[str]:
-    always_front = [c for c in ["pos", "Driver", "Team", "year", "round", "score", "p_win_%"] if c in df.columns]
-    if mode == "mini":
-        tail = [c for c in ["GridPosition", "finish_position"] if c in df.columns]
-        return always_front + tail
-    if mode == "core":
-        extra = [
-            "GridPosition", "finish_position", "quali_pre_pos_p50", "quali_pre_top10_rate",
-            "hist_pre_best10_pace_p50_s", "hist_pre_clean_share_mean",
-            "driver_trend", "team_dev_trend",
-        ]
-        return always_front + [c for c in extra if c in df.columns]
-    return list(df.columns)
-
-
-def _print_table(df: pd.DataFrame, topk: Optional[int], cols_mode: str) -> None:
-    d = df.copy()
-    if topk is not None and topk > 0:
-        d = d.head(topk)
-    cols = _choose_columns(d, cols_mode)
-    d = d.reindex(columns=cols)
-    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 160,
-                           "display.float_format", lambda v: f"{v:0.6g}"):
-        print(d.to_string(index=False))
-
-
-def _export(df: pd.DataFrame, fmt: str, out_path: Optional[str]) -> None:
-    if not out_path:
+        import torch
+    except Exception:
+        print("[warn] PyTorch unavailable; --explain disabled", file=sys.stderr)
         return
-    p = Path(out_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    if fmt == "json":
-        df.to_json(p, orient="records", force_ascii=False, indent=2)
-    elif fmt == "csv":
-        df.to_csv(p, index=False)
-    elif fmt == "parquet":
-        df.to_parquet(p, index=False)
+
+    from src.training.featureset import transform_with_scaler_df  # тот же трансформер, что в инференсе
+
+    # 1) порядок признаков берём из раннера/артефактов
+    feat_cols = list(getattr(runner, "feature_columns", runner.artifacts.feature_cols))  # :contentReference[oaicite:1]{index=1}
+
+    # 2) берём строки по нужным драйверам в заданном порядке
+    present = set(df["Driver"].astype(str))
+    drivers = [d for d in drivers if d in present]
+    if not drivers:
+        print("[warn] --explain: ни одного из запрошенных драйверов нет в DF", file=sys.stderr)
+        return
+    sub = df.set_index("Driver").loc[drivers, :].copy()
+
+    # 3) стандартизируем ровно как в инференсе
+    X = transform_with_scaler_df(sub, feat_cols, runner.artifacts.scaler, as_array=True).astype(np.float32, copy=False)  # :contentReference[oaicite:2]{index=2}
+
+    # 4) модель берём из артефактов раннера
+    model = runner.artifacts.model  # <-- ключевая правка :contentReference[oaicite:3]{index=3}
+    if model is None:
+        print("[warn] No model in artifacts; cannot compute explanations.", file=sys.stderr)
+        return
+    model.eval()
+
+    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
+    xt = _to_tensor(X, device=device)  # [D,F], requires_grad=True
+
+    with torch.enable_grad():
+        scores = model(xt)  # [D]
+
+    # 5) градиенты и вклад grad*input
+    grads = []
+    for i in range(xt.shape[0]):
+        model.zero_grad(set_to_none=True)
+        if xt.grad is not None:
+            xt.grad.zero_()
+        scores[i].backward(retain_graph=True)
+        grads.append(xt.grad[i].detach().cpu().numpy().copy())
+    grad = np.vstack(grads)                              # [D,F]
+    contrib = grad * xt.detach().cpu().numpy()           # grad*input (в стандартизированном пространстве)
+
+    # 6) what-if: прибиваем фичу к среднему (z=0) и смотрим Δscore
+    with torch.no_grad():
+        base = model(xt).detach().cpu().numpy()          # [D]
+    deltas = np.zeros_like(contrib, dtype=np.float32)
+    for j in range(X.shape[1]):
+        X_mut = xt.detach().clone()
+        X_mut[:, j] = 0.0                                # 0 ⇒ (value-mean)/std = 0
+        with torch.no_grad():
+            s_mut = model(X_mut).detach().cpu().numpy()
+        deltas[:, j] = base - s_mut
+
+    # 7) печать топов
+    for idx, drv in enumerate(drivers):
+        print(f"\n=== EXPLAIN {drv} ===")
+        z = xt[idx].detach().cpu().numpy()
+        topn_eff = min(topn, len(feat_cols))
+
+        # [A] |z|
+        topz = np.argsort(-np.abs(z))[:topn_eff]
+        print("[A] top |z-score| features")
+        for j in topz:
+            print(f"  {feat_cols[j]:40s}  z={z[j]:+7.3f}")
+
+        # [B] grad*input
+        c = contrib[idx]
+        topc = np.argsort(-np.abs(c))[:topn_eff]
+        print("[B] top grad*input (локальная важность)")
+        for j in topc:
+            print(f"  {feat_cols[j]:40s}  g*x={c[j]:+9.5f}")
+
+        # [C] Δscore при приведении к среднему
+        d = deltas[idx]
+        topd = np.argsort(-np.abs(d))[:topn_eff]
+        print("[C] top Δscore if set to mean")
+        for j in topd:
+            print(f"  {feat_cols[j]:40s}  Δscore={d[j]:+9.5f}")
+
+
+
+def _norm(s: str) -> str:
+    s = s.strip().lower()
+    out, prev_us = [], False
+    for ch in s:
+        if ch in ALPHA_NUM:
+            out.append(ch); prev_us = False
+        else:
+            if not prev_us: out.append("_"); prev_us = True
+    if out and out[-1] == "_": out.pop()
+    return "".join(out)
+
+def _find_col(all_cols: List[str], aliases: List[str]) -> Optional[str]:
+    cols_norm = {c: _norm(c) for c in all_cols}
+    norm2col = {v: k for k, v in cols_norm.items()}
+    for a in aliases:
+        na = _norm(a)
+        if na in norm2col: return norm2col[na]
+    for a in aliases:
+        na = _norm(a)
+        for c, nc in cols_norm.items():
+            if na in nc: return c
+    return None
+
+WEATHER_MAP: Dict[str, List[str]] = {
+    "AirTemp": ["weather_air_temp","air_temp","air_temp_c","air_temperature_c","met_air_c","weather::air_temp"],
+    "TrackTemp": ["weather_track_temp","track_temp","track_temp_c","track_temperature_c","weather::track_temp"],
+    "Humidity": ["weather_humidity","rel_humidity","relative_humidity","humidity"],
+    "WindSpeed": ["weather_wind_speed","wind_speed","wind_speed_mps","wind_speed_kph","wind_mps","wind_kph"],
+    "WindDirection": ["weather_wind_dir","wind_direction","wind_direction_deg","wind_dir"],
+}
+GRID_ALIASES = ["grid","grid_pos","grid_position","start_grid","start_grid_pos","starting_grid","start_position","quali_grid","quali_grid_pos"]
+
+def _onehot_track_columns(cols: List[str]) -> List[str]:
+    return [c for c in cols if c.startswith(("trk::","track::","track_is_"))]
+
+def _resolve_track_onehot_col(track_onehots: List[str], track_name: str) -> Optional[str]:
+    import difflib
+    base2col = {}
+    for c in track_onehots:
+        base = c
+        for pfx in ("trk::","track::","track_is_"):
+            if base.startswith(pfx): base = base[len(pfx):]
+        base2col[_norm(base)] = c
+    target = _norm(track_name)
+    if target in base2col: return base2col[target]
+    t2 = _norm("is_" + track_name)
+    if t2 in base2col: return base2col[t2]
+    best, score = None, 0.0
+    for b in base2col:
+        r = difflib.SequenceMatcher(a=b, b=target).ratio()
+        if r > score: best, score = b, r
+    return base2col[best] if best and score >= 0.80 else None
+
+def fmt_percent(x: float) -> str: return f"{x * 100:.1f}%"
+
+def pretty_print_table(df: pd.DataFrame, topk: int, cols_mode: str = "mini") -> None:
+    show = df.iloc[:topk].copy()
+    if cols_mode == "mini":
+        cols = [c for c in ("rank","Driver","year","round","score","p_win") if c in show.columns]
+        show = show[cols].rename(columns={"rank":"pos"})
+        show["p_win_%"] = show["p_win"].astype(float).map(fmt_percent)
+        show = show.drop(columns=["p_win"])
+    with pd.option_context("display.max_rows", None, "display.max_columns", None):
+        print(" pos Driver  year  round     score p_win_%")
+        for _, r in show.iterrows():
+            print(f"{int(r['pos']):4d} {str(r['Driver']):>5s}  {int(r['year']):4d} {int(r['round']):6d}  "
+                  f"{float(r['score']):10.6f}   {str(r['p_win_%']):>5s}")
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser("Predict race ranking (custom mode)")
+    ap.add_argument("--artifacts", type=str, required=True)
+    ap.add_argument("--features", type=str, required=True)
+    ap.add_argument("--mode", type=str, default="custom")
+    ap.add_argument("--drivers", type=str, required=True, help='CSV "VER,NOR,..."')
+    ap.add_argument("--track", type=str, required=True)
+    ap.add_argument("--weather-json", type=str, default="{}", help='{"AirTemp":27,...}')
+    ap.add_argument("--history-window", type=int, default=3)
+    ap.add_argument("--sim-year", type=int, required=True)
+    ap.add_argument("--sim-round", type=int, required=True)
+    ap.add_argument("--topk", type=int, default=20)
+    ap.add_argument("--cols", type=str, default="mini", choices=["mini","full"])
+    ap.add_argument("--grid", type=str, default=None, help='e.g. "VER=1,NOR=2,..."')
+    ap.add_argument("--tau", type=float, default=1.2, help="softmax temperature")
+    ap.add_argument("--explain", type=str, default=None, help='CSV драйверов для объяснения, напр. "VER,ALB"')
+    return ap.parse_args(argv)
+
+def _parse_grid(s: Optional[str]) -> Dict[str, float]:
+    if not s: return {}
+    out = {}
+    for part in s.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            try: out[k.strip()] = float(v)
+            except ValueError: pass
+    return out
+
+def _apply_weather(df: pd.DataFrame, weather_json: Dict[str, float]) -> None:
+    if not weather_json: return
+    cols = list(df.columns)
+    for key, aliases in WEATHER_MAP.items():
+        if key not in weather_json: continue
+        col = _find_col(cols, aliases)
+        if col is not None:
+            df.loc[:, col] = np.float32(weather_json[key])
+        else:
+            print(f"[warn] weather key '{key}' not mapped to any feature column", file=sys.stderr)
+
+def _apply_track_onehot(df: pd.DataFrame, track_name: str) -> None:
+    onehots = _onehot_track_columns(list(df.columns))
+    if not onehots:
+        print("[warn] no track one-hot columns found", file=sys.stderr); return
+    df.loc[:, onehots] = np.float32(0.0)
+    col = _resolve_track_onehot_col(onehots, track_name)
+    if col is None:
+        print(f"[warn] track '{track_name}' did not match any one-hot; leaving all zeros", file=sys.stderr); return
+    df.loc[:, col] = np.float32(1.0)
+
+def _apply_grid(df: pd.DataFrame, grid_map: Dict[str, float]) -> None:
+    if not grid_map: return
+    col = _find_col(list(df.columns), GRID_ALIASES)
+    if col is None:
+        print("[warn] no grid column found to set start positions", file=sys.stderr); return
+    for drv, pos in grid_map.items():
+        m = (df["Driver"] == drv)
+        if m.any(): df.loc[m, col] = np.float32(pos)
+        else: print(f"[warn] driver '{drv}' not present in current DF; grid ignored", file=sys.stderr)
+
+def _astype_floatwise(df: pd.DataFrame) -> None:
+    # Приводим только плавающие к float32; int оставляем как int (исключит предупреждения)
+    for c in df.columns:
+        if pd.api.types.is_float_dtype(df[c]):
+            df.loc[:, c] = df[c].astype(np.float32, copy=False)
+        # pandas 'boolean' → float32 при необходимости
+        elif str(df[c].dtype) == "boolean":
+            df.loc[:, c] = df[c].astype(np.float32, copy=False)
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
+
+    features_pq = Path(args.features)
+
+    # 1) читаем фичи
+    base_df = pd.read_parquet(features_pq)
+
+    # 2) фильтр по драйверам
+    drivers = [d.strip() for d in args.drivers.split(",") if d.strip()]
+    df = base_df.loc[base_df["Driver"].isin(drivers)].reset_index(drop=True).copy()
+
+    # 3) схлопываем до одной строки на пилота (берём самую свежую запись по year,round)
+    if "year" in df.columns and "round" in df.columns:
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        df["round"] = pd.to_numeric(df["round"], errors="coerce")
+        df = (df.sort_values(["Driver","year","round"])
+                .groupby("Driver", as_index=False, sort=False)
+                .tail(1)
+                .reset_index(drop=True))
     else:
-        raise ValueError(f"Unsupported --format for export: {fmt}")
-    log(f"💾 Saved predictions to {p}")
+        df = df.drop_duplicates("Driver", keep="last").reset_index(drop=True)
 
+    # 4) выставляем target гонку (типы оставляем int)
+    if "year" in df.columns:  df.loc[:, "year"]  = np.int32(args.sim_year)
+    if "round" in df.columns: df.loc[:, "round"] = np.int32(args.sim_round)
 
-# =====================================================================================
-#                                          eval
-# =====================================================================================
+    # 5) трек/погода/грид
+    _apply_track_onehot(df, args.track)
+    _apply_weather(df, json.loads(args.weather_json) if args.weather_json else {})
+    _apply_grid(df, _parse_grid(args.grid))
 
-def _evaluate_against_targets(pred: pd.DataFrame, targets_path: Path, year: int, round_: int) -> None:
-    try:
-        T = _read_table(targets_path)
-        if T.empty:
-            log("⚠️  Targets file is empty or not found — skip eval")
-            return
-        T = T[(T["year"] == year) & (T["round"] == round_)].copy()
-        if T.empty:
-            log("⚠️  No targets for specified race — skip eval")
-            return
-        cand = ["finish_pos", "finish_position", "finish_order", "position", "place"]
-        finish_col = next((c for c in cand if c in T.columns), None)
-        if finish_col is None:
-            log("⚠️  Targets missing finish position column — skip eval")
-            return
-        for c in ["Driver", finish_col]:
-            if c not in T.columns:
-                log("⚠️  Targets missing required columns — skip eval")
-                return
-        M = pred.merge(T[["Driver", finish_col]], on="Driver", how="inner")
-        if M.empty:
-            log("⚠️  No overlapping drivers with targets — skip eval")
-            return
-        M = M.copy()
-        M["true_rank"] = M[finish_col].rank(method="min", ascending=True).astype(int)
-        mae = float(np.mean(np.abs(M["true_rank"].to_numpy() - M["rank"].to_numpy())))
-        tr = pd.Series(M["true_rank"].to_numpy(dtype=float)).rank(method="average").to_numpy()
-        pr = pd.Series(M["rank"].to_numpy(dtype=float)).rank(method="average").to_numpy()
-        sp = float(np.corrcoef(tr, pr)[0, 1]) if len(M) >= 2 else np.nan
-        top1 = 1.0 if (M.sort_values("rank").iloc[0]["Driver"] == M.sort_values("true_rank").iloc[0]["Driver"]) else 0.0
-        log(f"Eval: spearman={sp:.4f}, mae_rank={mae:.3f}, top1={top1:.3f}  (n={len(M)})")
-    except Exception as e:
-        log(f"⚠️  Eval failed: {e}")
+    # 6) типы: только float-колонки → float32 (не трогаем year/round)
+    _astype_floatwise(df)
+    df = df.copy()  # дефрагментация
 
+    # 7) инференс: используем корректный API раннера
+    runner = InferenceRunner.from_dir(args.artifacts)  # :contentReference[oaicite:2]{index=2}
+    rank_df = runner.rank(
+        df,
+        temperature=float(args.tau),
+        by=("year","round"),         # группировка по гонке, softmax и ранги внутри (см. inference.rank) :contentReference[oaicite:3]{index=3}
+        include_probs=True,
+        ascending=False
+    )
 
-# =====================================================================================
-#                                          CLI
-# =====================================================================================
+    # 8) печать (используем готовые колонки rank/score/p_win)
+    # гарантируем человекочитаемый вывод
+    pretty_print_table(rank_df, topk=int(args.topk), cols_mode=args.cols)
 
-def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser("Predict finishing order")
-    ap.add_argument("--artifacts", default="models/ranker_v1", help="Папка с ranker.pt / scaler.json / feature_cols.txt")
-    ap.add_argument("--features", default="data/processed", help="Путь к features: либо all_features.parquet, либо папка с per-race")
-    ap.add_argument("--mode", choices=["race", "custom"], default="race", help="Режим предикта")
-
-    # race-mode
-    ap.add_argument("--year", type=int, help="Год гонки (race mode)")
-    ap.add_argument("--round", dest="round_", type=int, help="Номер этапа (round) (race mode)")
-    ap.add_argument("--eval", action="store_true", help="В режиме race: посчитать метрики против targets")
-    ap.add_argument("--targets", default="data/processed/all_targets.parquet", help="Путь к all_targets для оценки (race mode)")
-
-    # custom-mode
-    ap.add_argument("--lineup", help="JSON/YAML файл со списком пилотов (ключ 'drivers' или массив)")
-    ap.add_argument("--drivers", help="Альтернатива файлу: строка 'VER,PER,LEC,...'")
-    ap.add_argument("--history-window", type=int, default=3, help="Сколько последних гонок усреднять на профиль пилота (custom mode)")
-    ap.add_argument("--sim-year", type=int, default=2099, help="Год для синтетической гонки (custom mode)")
-    ap.add_argument("--sim-round", type=int, default=1, help="Раунд для синтетической гонки (custom mode)")
-
-    # common overrides
-    ap.add_argument("--track", help="Название трека/ивента (например, 'Monza', 'Jeddah', 'Spa'). Для custom/race (если пригодно)")
-    ap.add_argument("--weather-json", help='JSON с погодой: {"AirTemp":28,"TrackTemp":42,"Humidity":0.45,"WindSpeed":3.2,"WindDirection":180}')
-    ap.add_argument("--temp", type=float, default=1.0, help="Softmax temperature для перерасчёта вероятностей")
-
-    # output / pretty
-    ap.add_argument("--topk", type=int, default=20, help="Сколько верхних строк показывать")
-    ap.add_argument("--cols", choices=["mini", "core", "all"], default="mini", help="Набор колонок для вывода")
-    ap.add_argument("--format", choices=["table", "json", "csv", "parquet"], default="table", help="Формат вывода/сохранения")
-    ap.add_argument("--out", help="Путь для сохранения предикта, если формат json/csv/parquet")
-    ap.add_argument("--sort-by", choices=["rank", "p_win", "score"], default="rank", help="Сортировка вывода: по позиции, вероятности, или скору")
-
-    return ap
-
-
-def main() -> None:
-    ap = build_argparser()
-    args = ap.parse_args()
-
-    runner = InferenceRunner.from_dir(args.artifacts)
-    feature_cols = runner.artifacts.feature_cols
-
-    allF = _load_all_features(Path(args.features))
-    if allF.empty:
-        log("❌ Не найден файл с фичами (all_features.*)")
-        sys.exit(2)
-
-    chosen_track_col: Optional[str] = None
-
-    if args.mode == "race":
-        if args.year is None or args.round_ is None:
-            ap.error("--mode race требует --year и --round")
-        df_race = allF[(allF.get("year") == args.year) & (allF.get("round") == args.round_)].copy()
-        if df_race.empty:
-            log("❌ Нет строк для указанной гонки в all_features")
-            sys.exit(2)
-        df_race = _ensure_feature_columns(df_race, feature_cols)
-        if args.track:
-            df_race, chosen_track_col = _override_track(df_race, args.track, feature_cols)
-        df_race = _override_weather(df_race, args.weather_json)
-        out = runner.rank(df_race, temperature=args.temp, by=("year", "round"), include_probs=True)
-        if args.eval:
-            _evaluate_against_targets(out, Path(args.targets), int(df_race["year"].iloc[0]), int(df_race["round"].iloc[0]))
-    else:
-        drivers = _load_lineup(args.lineup, args.drivers)
-        if not drivers:
-            ap.error("Пустой список пилотов")
-        df_custom = _make_custom_features(
-            allF,
-            drivers=drivers,
-            history_window=args.history_window,
-            sim_year=args.sim_year,
-            sim_round=args.sim_round,
-        )
-        df_custom = _ensure_feature_columns(df_custom, feature_cols)
-        df_custom, chosen_track_col = _override_track(df_custom, args.track, feature_cols)
-        df_custom = _override_weather(df_custom, args.weather_json)
-        if chosen_track_col:
-            df_custom = _inject_track_same_features(df_custom, allF, chosen_track_col, feature_cols)
-        out = runner.rank(df_custom, temperature=args.temp, by=None, include_probs=True)
-
-    out = _finalize_for_output(out, args.sort_by)
-
-    if args.format == "table":
-        _print_table(out, args.topk, args.cols)
-    else:
-        df_to_save = out.head(args.topk) if (args.topk and args.topk > 0) else out
-        _export(df_to_save, args.format, args.out)
-        if args.out is None:
-            if args.format == "json":
-                print(df_to_save.to_json(orient="records", force_ascii=False, indent=2))
-            else:
-                log("⚠️  Для csv/parquet укажите --out PATH")
-
+    if args.explain:
+        exp_list = [s.strip() for s in args.explain.split(",") if s.strip()]
+        # оставим только тех, кто есть в df
+        exp_list = [d for d in exp_list if d in set(df["Driver"].tolist())]
+        if exp_list:
+            _explain_drivers(runner, Path(args.artifacts), df, exp_list, temperature=float(args.tau), topn=10)
+        else:
+            print("[warn] none of --explain drivers found in DF", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

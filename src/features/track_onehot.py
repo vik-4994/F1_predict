@@ -272,12 +272,13 @@ def _featurize_impl(
     races_df: Optional[pd.DataFrame] = None,
     roster: Optional[Sequence[str]] = None,
     options: Optional[Options] = None,
+    track_name: str | None = None
 ) -> pd.DataFrame:
     raw_dir = Path(raw_dir)
     opt = options or Options()
 
     # 1) Имя и slug трека
-    name = _event_name_from_ctx(locals().get("ctx", {}))
+    name = track_name or _event_name_from_meta(raw_dir, year, rnd) or _event_name_from_races_df(races_df, year, rnd)
     if not name:
         name = _event_name_from_meta(raw_dir, year, rnd) or _event_name_from_races_df(races_df, year, rnd)
     slug = _slugify(name) if name else None
@@ -355,7 +356,10 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
             max_lookback=int(get("max_lookback", 20)),
             include_onehot=bool(get("include_onehot", True)),
         )
-        return _featurize_impl(raw_dir, int(year), int(rnd), races_df=races_df, roster=roster, options=opts)
+
+        track_name = get("track", get("event", get("circuit", None)))
+
+        return _featurize_impl(raw_dir, int(year), int(rnd), races_df=races_df, roster=roster, options=opts, track_name=track_name)
 
     # старая сигнатура
     if len(args) >= 4 and isinstance(args[0], (str, Path)):
