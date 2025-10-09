@@ -383,7 +383,7 @@ def _featurize_impl(
             "tele_pre_last_seen_round": int(last["round"]),
         })
 
-    agg = hist.groupby("Driver", dropna=False).apply(_agg_driver).reset_index()
+    agg = hist.groupby("Driver", dropna=False).apply(_agg_driver, include_groups=False).reset_index()
 
     # 6) Align to roster & fill defaults
     if drivers:

@@ -209,7 +209,8 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             is_pit |= df[c].astype(bool)
     for c in ("PitInTime", "PitOutTime"):
         if c in df.columns:
-            is_pit |= pd.to_datetime(df[c], errors="coerce").notna()
+            _dt = pd.to_datetime(df[c], errors="coerce", utc=True, cache=True, format="mixed")
+            is_pit |= _dt.notna()
     df = df[~is_pit].copy()
 
     green = _is_green_flag(df)
@@ -224,9 +225,13 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
         if s.empty:
             continue
         if len(s) >= 3:
-            q1, q3 = s.quantile([0.25, 0.75])
-            thr = float(q3 + 2 * (q3 - q1))
-            clean_mask = s <= thr
+            med = float(s.median())
+            mad = float((s - med).abs().median())
+            if mad == 0 or not np.isfinite(mad):
+                clean_mask = s <= med  # деградація до медіани
+            else:
+                z = (s - med) / (1.4826 * mad)
+                clean_mask = (z > -0.5) & (z < 3.0)  # лівий «хвіст» трохи ширший, правий жорсткіше
             clean = s[clean_mask]
             clean_share = float(clean_mask.mean())
         else:
@@ -290,6 +295,7 @@ def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd
         ])
     else:
         def _agg(g: pd.DataFrame) -> pd.Series:
+            g = g.sort_values(["year", "round"])
             vals = pd.to_numeric(g["best10_rel_s"], errors="coerce").dropna()
             p50 = float(np.nanmedian(vals)) if len(vals) else np.nan
             q25 = np.nanpercentile(vals, 25) if len(vals) else np.nan
@@ -298,12 +304,26 @@ def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd
 
             cln = pd.to_numeric(g.get("clean_n"), errors="coerce").fillna(0.0)
             tot = pd.to_numeric(g.get("laps_n"),  errors="coerce").fillna(0.0)
-            rel = pd.to_numeric(g.get("clean_share_detrended"), errors="coerce")
+            rel = pd.to_numeric(g.get("clean_share_detrended"), errors="coerce").astype(float)
+            laps = pd.to_numeric(g.get("laps_n"), errors="coerce").fillna(0.0).clip(lower=0.0)
 
-            if np.isfinite(rel).any() and (tot.sum() > 0):
-                cmean = float(np.nansum(rel * tot) / tot.sum())
-            else:
-                cmean = float(np.nan)
+            age = np.arange(len(g))[::-1]          # 0 — найостанніша гонка
+            w_time = np.exp(-0.35 * age)
+
+            # мінімальна інформативність гонки: відсікти «порожні» або з <8 валідних кіл
+            mask_inf = laps >= 8
+            rel = rel.where(mask_inf)
+            w = (laps.clip(0, 200) * w_time).where(mask_inf).fillna(0.0)
+
+            # winsorize детренд, щоб прибити хвости
+            rel = pd.to_numeric(rel, errors="coerce").astype("float32")
+            rel = pd.Series(np.clip(rel.to_numpy(copy=False), -0.50, 0.50), index=rel.index)
+
+
+            cmean = float(np.nansum(rel * w) / np.nansum(w)) if np.nansum(w) > 0 else float("nan")
+
+            # фінальний кап вузькіший — стабілізує PSI/flip
+            cmean = float(np.clip(cmean, -0.30, 0.30))
 
             last = g.sort_values(["year", "round"]).tail(1)[["year", "round"]].iloc[0] if not g.empty else {"year": pd.NA, "round": pd.NA}
             return pd.Series({
@@ -318,7 +338,7 @@ def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd
                 "hist_pre_last_seen_round": int(last["round"]) if pd.notna(last["round"]) else pd.NA,
             })
 
-        pace_agg = pace.groupby("Driver", dropna=False).apply(_agg).reset_index()
+        pace_agg = pace.groupby("Driver", dropna=False).apply(_agg, include_groups=False).reset_index()
 
     if dnfs is None or dnfs.empty:
         dnf_agg = pd.DataFrame(columns=["Driver", "hist_pre_dnf_rate"])

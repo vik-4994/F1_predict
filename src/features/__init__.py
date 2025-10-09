@@ -26,6 +26,8 @@ from .pit_ops_risk_pre import featurize as pit_ops_risk_pre
 from .traffic_overtake_pre import featurize as traffic_overtake_pre
 from .driver_team_priors_pre import featurize as driver_team_priors_pre
 from .pit_ops_pre import featurize as pit_ops_pre
+from .track_profile import featurize as track_profile
+from .driver_track_cluster_pre import featurize as driver_track_cluster_pre
 
 # -------- TARGETS / LABELS (kept separate) --------
 from .results_target import featurize as results_target
@@ -34,6 +36,8 @@ from .results_target import featurize as results_target
 # телеметрия‑история → quali/стратегия/шины/тренды/надёжность/пит‑риски → трафик → прайоры → пит‑операции
 FEATURIZERS = [
     ("track_onehot", track_onehot),
+    ("track_profile", track_profile),
+    ("driver_track_cluster_pre", driver_track_cluster_pre),
     ("weather_basic", weather_basic),
     ("history_form", history_form),
     ("telemetry_history_pre", telemetry_history_pre),

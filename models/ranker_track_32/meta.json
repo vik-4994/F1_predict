@@ -6,19 +6,19 @@
   "dropout": 0.1,
   "lr": 0.001,
   "weight_decay": 0.0001,
-  "epochs": 80,
-  "val_last": 6,
+  "epochs": 200,
+  "val_last": 5,
   "seed": 42,
   "device": "cpu",
-  "in_dim": 71,
-  "best_epoch": 79,
+  "in_dim": 87,
+  "best_epoch": 1,
   "val_mean": {
-    "mae_pos": 3.7166666666666663,
-    "ndcg5": 0.7970218441992509,
-    "spearman": 0.5606516290724871,
-    "top1": 0.8333333333333334
+    "mae_pos": 5.959999999999999,
+    "ndcg5": 0.26561702439046025,
+    "spearman": 0.2574436090224671,
+    "top1": 0.0
   },
-  "num_features": 71,
-  "feature_cols_sha1": "faa0cb270c94ea7bc6ca2799763f4aef043ec3a1",
-  "num_params": 51457
+  "num_features": 87,
+  "feature_cols_sha1": "a57794c5d7c447f99b5893e0aad3f274c02f76bc",
+  "num_params": 55553
 }

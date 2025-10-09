@@ -270,8 +270,17 @@ def _featurize_impl(
         hist = pd.DataFrame(columns=["Driver","Team","Position","GridPosition","Points","DNF","year","round"])
 
     # агрегаты по пилотам/командам
-    drv_agg = (hist.groupby("Driver", dropna=False).apply(_agg_driver).reset_index()) if not hist.empty else pd.DataFrame(columns=["Driver"])
-    team_agg_raw = (hist.groupby("Team", dropna=False).apply(_agg_team).reset_index()) if not hist.empty else pd.DataFrame(columns=["Team"])
+    drv_agg = (
+        hist.groupby("Driver", dropna=False)
+            .apply(_agg_driver, include_groups=False)
+            .reset_index()
+    ) if not hist.empty else pd.DataFrame(columns=["Driver"])
+
+    team_agg_raw = (
+        hist.groupby("Team", dropna=False)
+            .apply(_agg_team, include_groups=False)
+            .reset_index()
+    ) if not hist.empty else pd.DataFrame(columns=["Team"])
 
     # текущая команда (без утечек)
     cur = _current_roster_team(raw_dir, year, rnd)
@@ -296,7 +305,11 @@ def _featurize_impl(
 
     # last seen
     if not hist.empty:
-        last_seen = hist.groupby("Driver").apply(lambda g: g.sort_values(["year","round"]).iloc[-1][["year","round"]])
+        last_seen = (
+            hist.sort_values(["Driver", "year", "round"])
+                .groupby("Driver", as_index=False)
+                .tail(1)[["Driver", "year", "round"]]
+        )
         last_seen = last_seen.reset_index()[["Driver","year","round"]]
         last_seen = last_seen.rename(columns={"year":"driver_team_pre_last_seen_year", "round":"driver_team_pre_last_seen_round"})
         out = out.merge(last_seen, on="Driver", how="left")

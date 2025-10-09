@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+
 import numpy as np
 import pandas as pd
 import torch
@@ -13,15 +13,17 @@ import torch
 pd.set_option("mode.copy_on_write", True)
 
 # наш раннер инференса (см. .from_dir/.rank)
-from src.training.inference import InferenceRunner  # :contentReference[oaicite:1]{index=1}
+from src.training.inference import InferenceRunner
+from src.features.track_profile import TRACK_TO_PROFILE, TRACK_TO_CLUSTER, DEFAULT_PROFILE
+from src.features.driver_track_cluster_pre import featurize as driver_trackc_featurize
 
 ALPHA_NUM = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 def _load_artifact_scaler(artifacts_dir: Path):
     """Пытаемся достать mean/std из артефактов (scaler.json)."""
-    import json
     sj = Path(artifacts_dir) / "scaler.json"
-    if not sj.exists(): return None
+    if not sj.exists():
+        return None
     with open(sj, "r") as f:
         obj = json.load(f)
     # ожидаем форматы {'mean': [...], 'std': [...], 'feature_cols': [...] } или отдельно feature_cols.txt
@@ -32,7 +34,14 @@ def _to_tensor(X: np.ndarray, device=None):
         device = "cpu"
     return torch.tensor(X, dtype=torch.float32, device=device, requires_grad=True)
 
-
+def _softmax_stable(x: np.ndarray, tau: float) -> np.ndarray:
+    """Чистый numpy-softmax с температурой."""
+    if tau <= 0:
+        tau = 1.0
+    m = np.max(x)
+    e = np.exp((x - m) / tau)
+    s = e.sum()
+    return e / s if s > 0 else np.full_like(e, 1.0 / len(e))
 
 def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
                      drivers: List[str], temperature: float = 1.2, topn: int = 10):
@@ -43,9 +52,8 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
       [C] top Δscore, если фичу прибить к среднему (what-if)
     """
     import sys
-    import numpy as np
     try:
-        import torch
+        import torch  # noqa: F401
     except Exception:
         print("[warn] PyTorch unavailable; --explain disabled", file=sys.stderr)
         return
@@ -53,7 +61,7 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
     from src.training.featureset import transform_with_scaler_df  # тот же трансформер, что в инференсе
 
     # 1) порядок признаков берём из раннера/артефактов
-    feat_cols = list(getattr(runner, "feature_columns", runner.artifacts.feature_cols))  # :contentReference[oaicite:1]{index=1}
+    feat_cols = list(getattr(runner, "feature_columns", runner.artifacts.feature_cols))
 
     # 2) берём строки по нужным драйверам в заданном порядке
     present = set(df["Driver"].astype(str))
@@ -64,10 +72,10 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
     sub = df.set_index("Driver").loc[drivers, :].copy()
 
     # 3) стандартизируем ровно как в инференсе
-    X = transform_with_scaler_df(sub, feat_cols, runner.artifacts.scaler, as_array=True).astype(np.float32, copy=False)  # :contentReference[oaicite:2]{index=2}
+    X = transform_with_scaler_df(sub, feat_cols, runner.artifacts.scaler, as_array=True).astype(np.float32, copy=False)
 
     # 4) модель берём из артефактов раннера
-    model = runner.artifacts.model  # <-- ключевая правка :contentReference[oaicite:3]{index=3}
+    model = runner.artifacts.model
     if model is None:
         print("[warn] No model in artifacts; cannot compute explanations.", file=sys.stderr)
         return
@@ -127,8 +135,6 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
         for j in topd:
             print(f"  {feat_cols[j]:40s}  Δscore={d[j]:+9.5f}")
 
-
-
 def _norm(s: str) -> str:
     s = s.strip().lower()
     out, prev_us = [], False
@@ -136,8 +142,11 @@ def _norm(s: str) -> str:
         if ch in ALPHA_NUM:
             out.append(ch); prev_us = False
         else:
-            if not prev_us: out.append("_"); prev_us = True
-    if out and out[-1] == "_": out.pop()
+            if not prev_us:
+                out.append("_")
+                prev_us = True
+    if out and out[-1] == "_":
+        out.pop()
     return "".join(out)
 
 def _find_col(all_cols: List[str], aliases: List[str]) -> Optional[str]:
@@ -145,11 +154,13 @@ def _find_col(all_cols: List[str], aliases: List[str]) -> Optional[str]:
     norm2col = {v: k for k, v in cols_norm.items()}
     for a in aliases:
         na = _norm(a)
-        if na in norm2col: return norm2col[na]
+        if na in norm2col:
+            return norm2col[na]
     for a in aliases:
         na = _norm(a)
         for c, nc in cols_norm.items():
-            if na in nc: return c
+            if na in nc:
+                return c
     return None
 
 WEATHER_MAP: Dict[str, List[str]] = {
@@ -170,19 +181,24 @@ def _resolve_track_onehot_col(track_onehots: List[str], track_name: str) -> Opti
     for c in track_onehots:
         base = c
         for pfx in ("trk::","track::","track_is_"):
-            if base.startswith(pfx): base = base[len(pfx):]
+            if base.startswith(pfx):
+                base = base[len(pfx):]
         base2col[_norm(base)] = c
     target = _norm(track_name)
-    if target in base2col: return base2col[target]
+    if target in base2col:
+        return base2col[target]
     t2 = _norm("is_" + track_name)
-    if t2 in base2col: return base2col[t2]
+    if t2 in base2col:
+        return base2col[t2]
     best, score = None, 0.0
     for b in base2col:
         r = difflib.SequenceMatcher(a=b, b=target).ratio()
-        if r > score: best, score = b, r
+        if r > score:
+            best, score = b, r
     return base2col[best] if best and score >= 0.80 else None
 
-def fmt_percent(x: float) -> str: return f"{x * 100:.1f}%"
+def fmt_percent(x: float) -> str:
+    return f"{x * 100:.1f}%"
 
 def pretty_print_table(df: pd.DataFrame, topk: int, cols_mode: str = "mini") -> None:
     show = df.iloc[:topk].copy()
@@ -212,24 +228,30 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--cols", type=str, default="mini", choices=["mini","full"])
     ap.add_argument("--grid", type=str, default=None, help='e.g. "VER=1,NOR=2,..."')
     ap.add_argument("--tau", type=float, default=1.2, help="softmax temperature")
+    ap.add_argument("--grid-weight", type=float, default=0.0, help="penalize score by start grid (0=off)")
     ap.add_argument("--explain", type=str, default=None, help='CSV драйверов для объяснения, напр. "VER,ALB"')
     return ap.parse_args(argv)
 
 def _parse_grid(s: Optional[str]) -> Dict[str, float]:
-    if not s: return {}
+    if not s:
+        return {}
     out = {}
     for part in s.split(","):
         if "=" in part:
             k, v = part.split("=", 1)
-            try: out[k.strip()] = float(v)
-            except ValueError: pass
+            try:
+                out[k.strip()] = float(v)
+            except ValueError:
+                pass
     return out
 
 def _apply_weather(df: pd.DataFrame, weather_json: Dict[str, float]) -> None:
-    if not weather_json: return
+    if not weather_json:
+        return
     cols = list(df.columns)
     for key, aliases in WEATHER_MAP.items():
-        if key not in weather_json: continue
+        if key not in weather_json:
+            continue
         col = _find_col(cols, aliases)
         if col is not None:
             df.loc[:, col] = np.float32(weather_json[key])
@@ -239,22 +261,28 @@ def _apply_weather(df: pd.DataFrame, weather_json: Dict[str, float]) -> None:
 def _apply_track_onehot(df: pd.DataFrame, track_name: str) -> None:
     onehots = _onehot_track_columns(list(df.columns))
     if not onehots:
-        print("[warn] no track one-hot columns found", file=sys.stderr); return
+        print("[warn] no track one-hot columns found")
+        return
     df.loc[:, onehots] = np.float32(0.0)
     col = _resolve_track_onehot_col(onehots, track_name)
     if col is None:
-        print(f"[warn] track '{track_name}' did not match any one-hot; leaving all zeros", file=sys.stderr); return
+        print(f"[warn] track '{track_name}' did not match any one-hot; leaving all zeros")
+        return
     df.loc[:, col] = np.float32(1.0)
 
 def _apply_grid(df: pd.DataFrame, grid_map: Dict[str, float]) -> None:
-    if not grid_map: return
+    if not grid_map:
+        return
     col = _find_col(list(df.columns), GRID_ALIASES)
     if col is None:
-        print("[warn] no grid column found to set start positions", file=sys.stderr); return
+        print("[warn] no grid column found to set start positions")
+        return
     for drv, pos in grid_map.items():
         m = (df["Driver"] == drv)
-        if m.any(): df.loc[m, col] = np.float32(pos)
-        else: print(f"[warn] driver '{drv}' not present in current DF; grid ignored", file=sys.stderr)
+        if m.any():
+            df.loc[m, col] = np.float32(pos)
+        else:
+            print(f"[warn] driver '{drv}' not present in current DF; grid ignored")
 
 def _astype_floatwise(df: pd.DataFrame) -> None:
     # Приводим только плавающие к float32; int оставляем как int (исключит предупреждения)
@@ -264,6 +292,67 @@ def _astype_floatwise(df: pd.DataFrame) -> None:
         # pandas 'boolean' → float32 при необходимости
         elif str(df[c].dtype) == "boolean":
             df.loc[:, c] = df[c].astype(np.float32, copy=False)
+
+def _build_grid_pos_map(df_features: pd.DataFrame,
+                        user_grid_map: Dict[str, float]) -> Dict[str, float]:
+    """Собираем карту Driver -> grid_pos. Приоритет: пользовательский --grid, затем колонка в фичах."""
+    if user_grid_map:
+        return {str(k): float(v) for k, v in user_grid_map.items()}
+    col = _find_col(list(df_features.columns), GRID_ALIASES)
+    if col is None:
+        return {}
+    m = df_features[["Driver", col]].dropna()
+    try:
+        m[col] = pd.to_numeric(m[col], errors="coerce")
+    except Exception:
+        pass
+    m = m.dropna()
+    return {str(r["Driver"]): float(r[col]) for _, r in m.iterrows()}
+
+def _apply_grid_weight(rank_df: pd.DataFrame,
+                       df_features: pd.DataFrame,
+                       user_grid_map: Dict[str, float],
+                       grid_weight: float,
+                       tau: float,
+                       groupby: Sequence[str] = ("year", "round"),
+                       beta: float = 0.25) -> pd.DataFrame:
+    """Применяем штраф за стартовую позицию и пересчитываем p_win/ранги."""
+    if grid_weight <= 0:
+        return rank_df
+
+    # соберём карту стартов
+    gmap = _build_grid_pos_map(df_features, user_grid_map)
+    if not gmap:
+        # нечем приземлять
+        return rank_df
+
+    df = rank_df.copy()
+    df["__grid_pos__"] = df["Driver"].map(gmap)
+    # дефолт на случай отсутствия — 10 позиция
+    df["__grid_pos__"] = df["__grid_pos__"].fillna(10.0)
+
+    # корректируем скор
+    df["score"] = df["score"] - float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
+
+    # пересчёт вероятностей и рангов по группам
+    gb = list(groupby) if groupby else []
+    if gb and all(c in df.columns for c in gb):
+        def _recalc(g: pd.DataFrame) -> pd.DataFrame:
+            p = _softmax_stable(g["score"].to_numpy(dtype=np.float64), tau=float(tau))
+            g = g.copy()
+            g["p_win"] = p.astype(np.float32)
+            g = g.sort_values("score", ascending=False)
+            g["rank"] = np.arange(1, len(g) + 1, dtype=np.int32)
+            return g
+        df = df.groupby(gb, group_keys=False).apply(_recalc)
+    else:
+        p = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
+        df["p_win"] = p.astype(np.float32)
+        df = df.sort_values("score", ascending=False)
+        df["rank"] = np.arange(1, len(df) + 1, dtype=np.int32)
+
+    df = df.drop(columns=["__grid_pos__"])
+    return df.reset_index(drop=True)
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
@@ -281,48 +370,64 @@ def main(argv: Optional[List[str]] = None) -> None:
     if "year" in df.columns and "round" in df.columns:
         df["year"] = pd.to_numeric(df["year"], errors="coerce")
         df["round"] = pd.to_numeric(df["round"], errors="coerce")
-        df = (df.sort_values(["Driver","year","round"])
-                .groupby("Driver", as_index=False, sort=False)
-                .tail(1)
-                .reset_index(drop=True))
+        df = (
+            df.sort_values(["Driver", "year", "round"])
+              .groupby("Driver", as_index=False, sort=False)
+              .tail(1)
+              .reset_index(drop=True)
+        )
     else:
         df = df.drop_duplicates("Driver", keep="last").reset_index(drop=True)
 
     # 4) выставляем target гонку (типы оставляем int)
-    if "year" in df.columns:  df.loc[:, "year"]  = np.int32(args.sim_year)
-    if "round" in df.columns: df.loc[:, "round"] = np.int32(args.sim_round)
+    if "year" in df.columns:
+        df.loc[:, "year"] = np.int32(args.sim_year)
+    if "round" in df.columns:
+        df.loc[:, "round"] = np.int32(args.sim_round)
 
     # 5) трек/погода/грид
     _apply_track_onehot(df, args.track)
     _apply_weather(df, json.loads(args.weather_json) if args.weather_json else {})
-    _apply_grid(df, _parse_grid(args.grid))
+    grid_map = _parse_grid(args.grid)
+    _apply_grid(df, grid_map)  # запишем в фичи, если там есть колонка грида
 
     # 6) типы: только float-колонки → float32 (не трогаем year/round)
     _astype_floatwise(df)
     df = df.copy()  # дефрагментация
 
-    # 7) инференс: используем корректный API раннера
-    runner = InferenceRunner.from_dir(args.artifacts)  # :contentReference[oaicite:2]{index=2}
+    # 7) инференс
+    runner = InferenceRunner.from_dir(args.artifacts)
     rank_df = runner.rank(
         df,
         temperature=float(args.tau),
-        by=("year","round"),         # группировка по гонке, softmax и ранги внутри (см. inference.rank) :contentReference[oaicite:3]{index=3}
+        by=("year", "round"),   # группировка по гонке, softmax и ранги внутри
         include_probs=True,
-        ascending=False
+        ascending=False,
     )
 
-    # 8) печать (используем готовые колонки rank/score/p_win)
-    # гарантируем человекочитаемый вывод
+    # 8) применяем приземлятор от грида и пересчитываем вероятности/ранги
+    rank_df = _apply_grid_weight(
+        rank_df=rank_df,
+        df_features=df,
+        user_grid_map=grid_map,
+        grid_weight=float(args.grid_weight),
+        tau=float(args.tau),
+        groupby=("year", "round"),
+        beta=0.25,
+    )
+
+    # 9) печать (используем готовые колонки rank/score/p_win)
     pretty_print_table(rank_df, topk=int(args.topk), cols_mode=args.cols)
 
+    # 10) explain (если нужен)
     if args.explain:
         exp_list = [s.strip() for s in args.explain.split(",") if s.strip()]
-        # оставим только тех, кто есть в df
         exp_list = [d for d in exp_list if d in set(df["Driver"].tolist())]
         if exp_list:
             _explain_drivers(runner, Path(args.artifacts), df, exp_list, temperature=float(args.tau), topn=10)
         else:
-            print("[warn] none of --explain drivers found in DF", file=sys.stderr)
+            print("[warn] none of --explain drivers found in DF")
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1:])

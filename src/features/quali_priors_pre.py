@@ -194,8 +194,21 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
     if hist.empty:
         return pd.DataFrame(columns=["Driver"])
 
-    # групповая агрегация без apply (чтобы не ловить FutureWarning)
-    g = hist.groupby("Driver", dropna=False)
+    # --- race-level detrend: позицию в квале делаем относительной ---
+    h = hist.copy()
+    h["QualiPos"] = pd.to_numeric(h["QualiPos"], errors="coerce")
+    # медиана по пелотону в конкретной квале
+    field_med = (
+        h.groupby(["year", "round"], dropna=False)["QualiPos"]
+         .median()
+         .rename("field_med")
+         .reset_index()
+    )
+    h = h.merge(field_med, on=["year", "round"], how="left")
+    # относительная позиция: капим хвост для устойчивости PSI
+    h["QualiPos_rel"] = (h["QualiPos"] - h["field_med"]).clip(-5, 5)
+
+    g = h.groupby("Driver", dropna=False)
 
     def p50(s: pd.Series) -> float:
         x = pd.to_numeric(s, errors="coerce")
@@ -205,22 +218,27 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
         x = pd.to_numeric(s, errors="coerce").dropna().to_numpy()
         return float(np.nanpercentile(x, 75) - np.nanpercentile(x, 25)) if x.size >= 2 else np.nan
 
+    # базовые агрегации (оставляем совместимость имён)
     out = pd.DataFrame({
         "quali_pre_hist_n": g.size().astype(int),
-        "quali_pre_pos_p50": g["QualiPos"].apply(p50),
-        "quali_pre_pos_iqr": g["QualiPos"].apply(iqr),
+        "quali_pre_pos_p50": g["QualiPos"].apply(p50),                 # медиана сырой позиции (для интерпретации)
+        "quali_pre_pos_iqr": g["QualiPos_rel"].apply(iqr),             # IQR по ОТНОСИТЕЛЬНОЙ позиции (снижаем PSI)
         "quali_pre_bestpos_min": g["QualiPos"].min().astype("float"),
-        "quali_pre_top10_rate": g["QualiPos"].apply(lambda s: float((pd.to_numeric(s, errors="coerce") <= 10).mean()) if s.notna().any() else np.nan),
+        "quali_pre_top10_rate": g["QualiPos"].apply(
+            lambda s: float((pd.to_numeric(s, errors="coerce") <= 10).mean()) if s.notna().any() else np.nan
+        ),
         "quali_pre_notime_or_pen_rate": g["NoTimeOrPen"].mean(),
-        "quali_pre_points_mean": (g["Points"].mean() if "Points" in hist.columns else pd.Series(dtype=float)),
+        "quali_pre_points_mean": (g["Points"].mean() if "Points" in h.columns else pd.Series(dtype=float)),
     }).reset_index()
 
+    # добавляем «правильное направление»: больше = стабильнее
+    out["quali_pre_pos_consistency"] = -g["QualiPos_rel"].apply(iqr)
+
     # last seen (макс. год/раунд)
-    last = g[["year","round"]].max().reset_index().rename(columns={
+    last = g[["year", "round"]].max().reset_index().rename(columns={
         "year": "quali_pre_last_seen_year",
         "round": "quali_pre_last_seen_round"
     })
-
     out = out.merge(last, on="Driver", how="left")
 
     # типы
@@ -228,6 +246,7 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
     return out
+
 
 # -------------------- ядро --------------------
 

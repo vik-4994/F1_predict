@@ -61,21 +61,28 @@ _BLACKLIST = {
     "Points", "GridPosition", "Status", "Time",
 }
 
+# Доп. правила отбора:
+#  - категорические one-hot, которые оставляем как 0/1 и НЕ скейлим
+_SAFE_ONEHOT_PREFIXES: Tuple[str, ...] = (
+    "track_is_", "team_is_", "driver_is_", "track_cluster_"
+)
+
+#  - «плохие» паттерны, которые выкидываем из фичей
+_BLOCK_PATTERNS = (
+    r"_last_seen_(year|round)$",       # календарные подсказки — выкидываем
+    r"^(quali_pre|driver_team_pre).*_hist_n$",  # только эти hist_n режем
+    r"^quali_pre_pos_iqr$",            # ОСТАВИМ блокировку, но см. пункт 2 (fallback)
+    r"^driver_team_pre_driver_finish_iqr$",
+)
+
+
 # extra prefixes we proactively treat as numeric even if dtype=object
 # based on pre-race feature modules
-_OBJECT_NUMERIC_PREFIXES: Tuple[str, ...] = (
-    # driver/team priors
-    "driver_team_pre_",
-    # history form
-    "hist_pre_",
-    # telemetry priors
-    "tele_pre_",
-    # quali priors
-    "quali_pre_",
-    # traffic & overtakes / lap1
+_OBJECT_NUMERIC_PREFIXES = (
+    "driver_team_pre_", "driver_trackc_pre_",     # ← НОВОЕ
+    "hist_pre_", "tele_pre_", "quali_pre_",
     "traffic_", "lap1_", "net_pass_",
-    # track one-hot (sometimes saved as "0"/"1" strings)
-    "track_is_",
+    "track_is_", "track_",                        # ← чтобы числовые track_* точно не застряли объектом
 )
 
 
@@ -142,6 +149,19 @@ def select_feature_cols(
 
     if drop_all_nan:
         cols = [c for c in cols if not work[c].isna().all()]
+
+    # выкидываем нежелательные паттерны
+    if cols:
+        import re
+        keep: List[str] = []
+        for c in cols:
+            bad = any(re.search(p, c) for p in _BLOCK_PATTERNS)
+            if not bad:
+                keep.append(c)
+        cols = keep
+
+    # лёгкий приоритет allow: если есть новая фича consistency — старая IQR уже и так отфильтрована
+    # ничего дополнительного делать не нужно
 
     return cols
 
@@ -240,6 +260,17 @@ def fit_scaler_on_df(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureSc
     std = np.where(np.isfinite(std), std, 1.0).astype(np.float32)
     # guard against tiny variance
     std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
+
+    # НЕ скейлим безопасные one-hot: оставим их как 0/1.
+    if feature_cols:
+        oh_mask = np.array([any(str(c).startswith(p) for p in _SAFE_ONEHOT_PREFIXES)
+                            for c in feature_cols], dtype=bool)
+        if oh_mask.any():
+            mean = mean.copy()
+            std = std.copy()
+            mean[oh_mask] = 0.0
+            std[oh_mask] = 1.0
+
     return FeatureScaler(mean=mean, std=std, eps=1e-6)
 
 

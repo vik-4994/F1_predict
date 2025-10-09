@@ -25,11 +25,19 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from tqdm.auto import tqdm
 
 import pandas as pd
 
 # import registry and orchestrator
-from src.features import FEATURIZERS, TARGETIZERS  # type: ignore
+from src.features import FEATURIZERS, TARGETIZERS
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Mean of empty slice",
+    category=RuntimeWarning,
+)
 
 
 # ------------------------------------------------------------
@@ -103,13 +111,19 @@ def run_modules(
     strict_empty: bool = False,
     merge_how: str = "outer",
     verbose: bool = False,
+    progress: bool = False,
 ) -> pd.DataFrame:
     """Execute selected modules and merge on 'Driver'. Optionally dump intermediates.
     Returns merged DataFrame (may be empty).
     """
     to_run = [(n, f) for (n, f) in module_specs if (select is None or n in select)]
     frames: List[pd.DataFrame] = []
-    for name, fn in to_run:
+
+    mod_iter = to_run
+    if progress and not verbose:
+        mod_iter = tqdm(to_run, desc="Modules", unit="feat", leave=False)
+
+    for name, fn in mod_iter:
         try:
             part = fn(ctx)
         except Exception as e:
@@ -163,6 +177,7 @@ def main() -> None:
     ap.add_argument("--ctx-json", type=str, default=None, help="JSON with extra ctx (weights, knobs, etc.)")
     ap.add_argument("--merge-how", type=str, default="outer", choices=["outer", "inner"], help="Merge strategy")
     ap.add_argument("--strict-empty", action="store_true", help="Treat empty module as an error")
+    ap.add_argument("--progress", action="store_true", help="Show progress bars for races/modules")
 
     args = ap.parse_args()
 
@@ -186,7 +201,11 @@ def main() -> None:
     all_feat: List[pd.DataFrame] = []
     all_tgt: List[pd.DataFrame] = []
 
-    for (year, rnd) in races:
+    race_iter = races
+    if args.progress and not args.verbose:
+        race_iter = tqdm(races, desc="Races", unit="race")
+
+    for (year, rnd) in race_iter:
         tag = f"{year}_{rnd}"
         feat_path = out_dir / f"features_{tag}.parquet"
         if args.skip_existing and feat_path.exists():
@@ -216,6 +235,7 @@ def main() -> None:
             strict_empty=args.strict_empty,
             merge_how=args.merge_how,
             verbose=args.verbose,
+            progress=(args.progress and not args.verbose),
         )
         if feat_df is None or feat_df.empty:
             log("  ! no features produced (empty result)")
@@ -231,6 +251,7 @@ def main() -> None:
                 strict_empty=False,
                 merge_how="outer",
                 verbose=args.verbose,
+                progress=(args.progress and not args.verbose),
             )
             if tgt_df is not None and not tgt_df.empty:
                 # merge into features and also save standalone targets
