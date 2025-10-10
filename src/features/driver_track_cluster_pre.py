@@ -34,7 +34,7 @@ import pandas as pd
 try:
     from .utils import ensure_driver_index
     from .track_onehot import _slugify, _event_slug_from_meta, _ensure_driver_list
-    from .track_profile import TRACK_TO_CLUSTER, CLUSTERS, CLUSTER_ID
+    from .track_profile.track_profile import TRACK_TO_CLUSTER, CLUSTERS, CLUSTER_ID
 except Exception:
     from utils import ensure_driver_index  # type: ignore
     def _slugify(s: str) -> str:  # type: ignore

@@ -26,7 +26,7 @@ from .pit_ops_risk_pre import featurize as pit_ops_risk_pre
 from .traffic_overtake_pre import featurize as traffic_overtake_pre
 from .driver_team_priors_pre import featurize as driver_team_priors_pre
 from .pit_ops_pre import featurize as pit_ops_pre
-from .track_profile import featurize as track_profile
+from .track_profile.track_profile import featurize as track_profile
 from .driver_track_cluster_pre import featurize as driver_track_cluster_pre
 
 # -------- TARGETS / LABELS (kept separate) --------

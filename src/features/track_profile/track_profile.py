@@ -35,8 +35,8 @@ import pandas as pd
 
 # Локальные импорты из пакета фич
 try:
-    from .utils import ensure_driver_index
-    from .track_onehot import (
+    from ..utils import ensure_driver_index
+    from ..track_onehot import (
         _event_slug_from_meta, _event_name_from_meta, _event_name_from_races_df,
         _ensure_driver_list, _slugify,
     )
@@ -137,7 +137,6 @@ def _detect_slug(raw_dir: Path, year: int, rnd: int, ctx) -> Optional[str]:
     s = _event_slug_from_meta(raw_dir, year, rnd)
     if s:
         return s
-    # 3) из результатов / кругов (fallback)
     for name in (f"results_{year}_{rnd}.csv", f"laps_{year}_{rnd}.csv"):
         p = raw_dir / name
         if p.exists():
@@ -161,10 +160,6 @@ def _norm(x: float, lo: float, hi: float) -> float:
 
 
 def _compose_derived(p: TrackProfile) -> Dict[str, float]:
-    """Производные индексы из базовых величин.
-    Все значения приводим к float32, диапазоны 0..1 где возможно.
-    """
-    # Нормировки для индексов (диапазоны подобраны здраво, но спокойно правятся)
     straight_n = _norm(p.straight_pct, 0.35, 0.75)
     fast_n    = _norm(p.fast_corner_ratio, 0.25, 0.75)
     brake_n   = _norm(p.braking_ev_per_lap, 4.0, 12.0)
@@ -173,16 +168,13 @@ def _compose_derived(p: TrackProfile) -> Dict[str, float]:
     tdeg_n    = _norm(p.tdeg_index, 0.2, 0.9)
     aero_n    = _norm(p.aero_df_index, 0.2, 0.9)
 
-    # Индекс «мощность vs прижимная» — кто важнее на этой трассе
     power_vs_df = float(np.clip(straight_n - aero_n * 0.7, -1.0, 1.0))
 
-    # Индекс обгонов: больше DRS, торможений и прямых — проще; быстрые повороты — сложнее
     overtake_index = (
         0.35 * straight_n + 0.40 * brake_n + 0.25 * drs_n - 0.20 * fast_n
     )
     overtake_index = float(np.clip(overtake_index, 0.0, 1.0))
 
-    # Если pit_loss/fuel_effect не заданы — лёгкая эвристика
     pit_loss = p.pit_loss_s if p.pit_loss_s is not None else float(17.0 + 0.6 * p.lap_km + 0.8 * p.drs_zones)
     fuel_eff = p.fuel_effect_s_per10kg if p.fuel_effect_s_per10kg is not None else float(0.036 * p.lap_km + 0.005)
 
@@ -191,7 +183,6 @@ def _compose_derived(p: TrackProfile) -> Dict[str, float]:
         "track_overtake_index": overtake_index,
         "track_pit_loss_s": float(pit_loss),
         "track_fuel_effect_s_per10kg": float(fuel_eff),
-        # нормировки тоже отдаём — часто полезны модели
         "track_straight_n": straight_n,
         "track_fast_corner_n": fast_n,
         "track_braking_n": brake_n,
@@ -241,32 +232,24 @@ def _maybe_load_csv_profiles(raw_dir: Path) -> Tuple[Dict[str, TrackProfile], Di
                     clusters[slug] = cl
     return profiles, clusters
 
-# -------------------- основной API --------------------
+# -------------------- API --------------------
 
 def featurize(ctx: dict) -> pd.DataFrame:
-    """Собрать расширенный профиль трассы и размножить по всем пилотам текущего заезда.
-
-    ctx = {'raw_dir': Path|str, 'year': int, 'round': int, Optional 'track': str}
-    """
     raw_dir = Path(ctx.get("raw_dir"))
     year = int(ctx.get("year"))
     rnd = int(ctx.get("round"))
 
-    # Список пилотов (переиспользуем логику из track_onehot)
     drivers = _ensure_driver_list(ctx, raw_dir, year, rnd)
     if not drivers:
         return pd.DataFrame()
 
-    # Определяем slug трассы
     slug = _detect_slug(raw_dir, year, rnd, ctx) or ""
 
-    # Локально подмешиваем CSV‑переопределения, если есть
     csv_prof, csv_cl = _maybe_load_csv_profiles(raw_dir)
 
     p = csv_prof.get(slug) or TRACK_TO_PROFILE.get(slug) or DEFAULT_PROFILE
     cluster = csv_cl.get(slug) or TRACK_TO_CLUSTER.get(slug) or "balanced"
 
-    # Базовые значения
     base = {
         "track_slug": slug or "unknown",
         "track_straight_pct": float(p.straight_pct),
@@ -277,20 +260,17 @@ def featurize(ctx: dict) -> pd.DataFrame:
         "track_tdeg_index": float(p.tdeg_index),
         "track_aero_df_index": float(p.aero_df_index),
         "track_cluster": str(cluster),
-        "track_cluster_id": float(CLUSTER_ID.get(cluster, 1)),  # balanced=1 по умолчанию
+        "track_cluster_id": float(CLUSTER_ID.get(cluster, 1)),
     }
     for k in CLUSTERS:
         base[f"track_cluster_{k}"] = float(cluster == k)
 
-    # Производные индексы
     base.update(_compose_derived(p))
 
-    # Гарантируем типы float32 для числовых
     for k, v in list(base.items()):
         if isinstance(v, (int, float, np.floating)):
             base[k] = np.float32(v)
 
-    # Размножаем на всех пилотов
     out = ensure_driver_index(pd.Series(drivers), base)
     return out
 

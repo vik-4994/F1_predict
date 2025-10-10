@@ -14,7 +14,7 @@ pd.set_option("mode.copy_on_write", True)
 
 # наш раннер инференса (см. .from_dir/.rank)
 from src.training.inference import InferenceRunner
-from src.features.track_profile import TRACK_TO_PROFILE, TRACK_TO_CLUSTER, DEFAULT_PROFILE
+from features.track_profile.track_profile import TRACK_TO_PROFILE, TRACK_TO_CLUSTER, DEFAULT_PROFILE
 from src.features.driver_track_cluster_pre import featurize as driver_trackc_featurize
 
 ALPHA_NUM = "abcdefghijklmnopqrstuvwxyz0123456789"
