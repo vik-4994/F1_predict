@@ -31,7 +31,7 @@ import pandas as pd
 import re
 
 try:
-    from .utils import read_csv_if_exists
+    from ..utils import read_csv_if_exists
 except Exception:  # pragma: no cover
     def read_csv_if_exists(p: Path) -> pd.DataFrame:  # type: ignore
         import pandas as _pd

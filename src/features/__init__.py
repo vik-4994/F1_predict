@@ -20,7 +20,7 @@ from .telemetry_history_pre import featurize as telemetry_history_pre
 from .quali_priors_pre import featurize as quali_priors_pre
 from .strategy_priors_pre import featurize as strategy_priors_pre
 from .tyre_priors_pre import featurize as tyre_priors_pre
-from .dev_trend_pre import featurize as dev_trend_pre
+from .dev_thend_pre.dev_trend_pre import featurize as dev_trend_pre
 from .reliability_risk_pre import featurize as reliability_risk_pre
 from .pit_ops_risk_pre import featurize as pit_ops_risk_pre
 from .traffic_overtake_pre import featurize as traffic_overtake_pre
