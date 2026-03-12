@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
-import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.features import featurize_pre
-from src.training import InferenceRunner, sanitize_frame_columns, transform_with_scaler_df
+from src.scenario_builder import build_scenario_features, resolve_official_track_name
+from src.frame_utils import sanitize_frame_columns
+
+if TYPE_CHECKING:
+    from src.training import InferenceRunner
 
 pd.set_option("mode.copy_on_write", True)
 
@@ -30,7 +33,9 @@ WEATHER_MAP: Dict[str, List[str]] = {
 GRID_ALIASES = ["grid", "grid_pos", "grid_position", "start_grid", "start_grid_pos", "starting_grid", "start_position", "quali_grid", "quali_grid_pos"]
 
 
-def _to_tensor(X: np.ndarray, device: str = "cpu") -> torch.Tensor:
+def _to_tensor(X: np.ndarray, device: str = "cpu") -> Any:
+    import torch
+
     return torch.tensor(X, dtype=torch.float32, device=device, requires_grad=True)
 
 
@@ -127,8 +132,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--features", type=str, default=None, help="Fallback legacy features table")
     ap.add_argument("--raw-dir", type=str, default=None, help="Raw CSV directory to rebuild pre-race features for the target event")
     ap.add_argument("--mode", type=str, default="custom")
-    ap.add_argument("--drivers", type=str, required=True, help='CSV "VER,NOR,..."')
-    ap.add_argument("--track", type=str, required=True)
+    ap.add_argument("--drivers", type=str, default=None, help='Optional CSV "VER,NOR,..."; omit for full grid in --raw-dir mode')
+    ap.add_argument("--track", type=str, default=None, help="Optional track/event name; defaults to official event name for the round")
     ap.add_argument("--weather-json", type=str, default="{}", help='{"AirTemp":27,...}')
     ap.add_argument("--history-window", type=int, default=3)
     ap.add_argument("--sim-year", type=int, required=True)
@@ -249,7 +254,8 @@ def _apply_grid_weight(
             group["rank"] = np.arange(1, len(group) + 1, dtype=np.int32)
             return group
 
-        df = df.groupby(gb, group_keys=False).apply(_recalc)
+        chunks = [_recalc(df.loc[idx]) for _, idx in df.groupby(gb, sort=False).indices.items()]
+        df = pd.concat(chunks, axis=0, ignore_index=False) if chunks else df.iloc[0:0].copy()
     else:
         p = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
         df["p_win"] = p.astype(np.float32)
@@ -294,38 +300,27 @@ def _build_legacy_features(features_path: Path, drivers: List[str], sim_year: in
     return df
 
 
-def _build_scenario_features(raw_dir: Path, drivers: List[str], sim_year: int, sim_round: int, track: str) -> pd.DataFrame:
-    ctx = {
-        "raw_dir": raw_dir,
-        "year": sim_year,
-        "round": sim_round,
-        "track": track,
-        "drivers": drivers,
-        "roster": drivers,
-        "mode": "auto",
-        "allow_fallback_actual": True,
-    }
-    df = featurize_pre(ctx)
-    df = sanitize_frame_columns(df)
-    if df.empty:
-        raise RuntimeError("Failed to rebuild scenario features from raw data")
-
-    df = _ordered_driver_slice(df, drivers)
-    if df.empty:
-        raise RuntimeError("Requested drivers are missing from rebuilt scenario features")
-
-    if "year" not in df.columns:
-        df["year"] = np.int32(sim_year)
-    else:
-        df.loc[:, "year"] = np.int32(sim_year)
-    if "round" not in df.columns:
-        df["round"] = np.int32(sim_round)
-    else:
-        df.loc[:, "round"] = np.int32(sim_round)
-    return df
+def _warn_track_round_mismatch(raw_dir: Path, sim_year: int, sim_round: int, requested_track: Optional[str]) -> Optional[str]:
+    official = resolve_official_track_name(raw_dir, sim_year, sim_round)
+    if not requested_track or not official:
+        return official
+    req = _norm(requested_track)
+    off = _norm(official)
+    if req == off:
+        return official
+    ratio = difflib.SequenceMatcher(a=req, b=off).ratio()
+    if ratio < 0.88:
+        print(
+            f"[warn] requested track '{requested_track}' does not match the official event for {sim_year} round {sim_round}: '{official}'",
+            file=sys.stderr,
+        )
+    return official
 
 
-def _explain_drivers(runner: InferenceRunner, df: pd.DataFrame, drivers: List[str], topn: int = 10) -> None:
+def _explain_drivers(runner: "InferenceRunner", df: pd.DataFrame, drivers: List[str], topn: int = 10) -> None:
+    import torch
+    from src.training import transform_with_scaler_df
+
     feat_cols = list(runner.feature_columns)
     present = set(df["Driver"].astype(str))
     drivers = [drv for drv in drivers if drv in present]
@@ -402,21 +397,43 @@ def _explain_drivers(runner: InferenceRunner, df: pd.DataFrame, drivers: List[st
 
 
 def main(argv: Optional[List[str]] = None) -> None:
+    from src.training import InferenceRunner
+
     args = parse_args(argv)
 
-    drivers = [drv.strip() for drv in args.drivers.split(",") if drv.strip()]
-    if not drivers:
-        raise SystemExit("No drivers provided")
+    drivers = [drv.strip() for drv in (args.drivers or "").split(",") if drv.strip()]
+    track_name = str(args.track).strip() if args.track else None
 
     if args.raw_dir:
-        df = _build_scenario_features(Path(args.raw_dir), drivers, int(args.sim_year), int(args.sim_round), args.track)
+        raw_dir = Path(args.raw_dir)
+        official_track = _warn_track_round_mismatch(raw_dir, int(args.sim_year), int(args.sim_round), track_name)
+        df, resolved_track, roster = build_scenario_features(
+            raw_dir,
+            int(args.sim_year),
+            int(args.sim_round),
+            track=track_name,
+            drivers=(drivers or None),
+            mode="auto",
+            allow_fallback_actual=True,
+            verbose=False,
+        )
+        track_name = track_name or resolved_track or official_track
+        if not track_name:
+            raise SystemExit("Could not resolve track name from --track or raw schedule/meta")
+        if not drivers:
+            drivers = roster
     else:
         if not args.features:
             raise SystemExit("Either --raw-dir or --features is required")
+        if not drivers:
+            raise SystemExit("--drivers is required when using legacy --features mode")
+        if not track_name:
+            raise SystemExit("--track is required when using legacy --features mode")
         print("[warn] using legacy prediction mode from historical feature rows; pass --raw-dir for rebuilt scenario features", file=sys.stderr)
         df = _build_legacy_features(Path(args.features), drivers, int(args.sim_year), int(args.sim_round))
+        track_name = track_name or "unknown"
 
-    _apply_track_onehot(df, args.track)
+    _apply_track_onehot(df, track_name)
     _apply_weather(df, json.loads(args.weather_json) if args.weather_json else {})
     grid_map = _parse_grid(args.grid)
     _apply_grid(df, grid_map)

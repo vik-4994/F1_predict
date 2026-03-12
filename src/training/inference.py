@@ -279,7 +279,10 @@ def make_ranking_df(
     if by is None:
         out = _rank_one(df)
     else:
-        out = df.groupby(list(by), group_keys=False).apply(_rank_one)
+        chunks: List[pd.DataFrame] = []
+        for _, idx in df.groupby(list(by), sort=False).indices.items():
+            chunks.append(_rank_one(df.loc[idx]))
+        out = pd.concat(chunks, axis=0, ignore_index=False) if chunks else df.iloc[0:0].copy()
 
                                               
     lead: List[str] = []

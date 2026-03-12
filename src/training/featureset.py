@@ -315,8 +315,16 @@ def fit_scaler_on_df(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureSc
     d = _ensure_columns(df, feature_cols)
     d = _coerce_object_featurelike(d)
     X = d.loc[:, list(feature_cols)].to_numpy(dtype=np.float32, copy=False)
-    mean = np.nanmean(X, axis=0)
-    std = np.nanstd(X, axis=0)
+    finite = np.isfinite(X)
+    counts = finite.sum(axis=0).astype(np.float32, copy=False)
+    safe_counts = np.where(counts > 0, counts, 1.0).astype(np.float32, copy=False)
+
+    sums = np.where(finite, X, 0.0).sum(axis=0, dtype=np.float64)
+    mean = (sums / safe_counts).astype(np.float32, copy=False)
+
+    centered = np.where(finite, X - mean, 0.0)
+    var = (centered * centered).sum(axis=0, dtype=np.float64) / safe_counts
+    std = np.sqrt(var).astype(np.float32, copy=False)
                                                   
     mean = np.where(np.isfinite(mean), mean, 0.0).astype(np.float32)
     std = np.where(np.isfinite(std), std, 1.0).astype(np.float32)
@@ -393,6 +401,8 @@ def get_feature_groups(cols: Iterable[str]) -> Dict[str, List[str]]:
             put("track_same", c)
         elif c.startswith("weather_"):
             put("weather", c)
+        elif c.startswith("sprint_pre_"):
+            put("sprint", c)
         elif c.startswith("strategy_") or c.startswith("expected_stop_"):
             put("strategy", c)
         elif c.startswith("tyre_") or c.startswith("compound_") or c.startswith("deg_"):
@@ -403,10 +413,12 @@ def get_feature_groups(cols: Iterable[str]) -> Dict[str, List[str]]:
             put("reliability", c)
         elif c.startswith("hist_"):
             put("history", c)
-        elif c.startswith("tele_"):
+        elif c.startswith("tele_") or c.startswith("tele_eff_"):
             put("telemetry_quali", c)
-        elif c.startswith("quali_"):
+        elif c.startswith("quali_") or c.startswith("qexec_"):
             put("qualifying", c)
+        elif c.startswith("prac_"):
+            put("practice", c)
         elif c.startswith("driver_team_pre_"):
             put("driver_team", c)
         elif c.startswith("lap1_") or c.startswith("traffic_") or c.startswith("net_pass_"):
