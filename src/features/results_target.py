@@ -1,4 +1,4 @@
-# FILE: src/features/results_target.py
+                                      
 from __future__ import annotations
 from pathlib import Path
 import pandas as pd
@@ -18,7 +18,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
 
     out = pd.DataFrame()
 
-    # Ключ Driver: сначала Abbreviation, иначе DriverNumber
+                                                           
     if "Abbreviation" in df.columns:
         out["Driver"] = df["Abbreviation"].astype(str)
     elif "Driver" in df.columns:
@@ -28,7 +28,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # Позиция/очки/грид/статус — если есть
+                                          
     if "Position" in df.columns:
         out["finish_position"] = pd.to_numeric(df["Position"], errors="coerce")
     for col in ["Status", "Points", "GridPosition", "Time"]:

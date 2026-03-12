@@ -1,4 +1,4 @@
-# src/training/inference.py
+                           
 from __future__ import annotations
 
 import json
@@ -25,9 +25,9 @@ from .featureset import (
     transform_with_scaler_df,
 )
 
-# =====================================================================================
-#                                        API
-# =====================================================================================
+                                                                                       
+                                            
+                                                                                       
 
 @dataclass
 class Artifacts:
@@ -65,22 +65,22 @@ def load_artifacts(
     adir = Path(artifacts_dir)
     dev = _auto_device(device)
 
-    # --- feature_cols ---
+                          
     fcols_path = adir / "feature_cols.txt"
     feature_cols = load_feature_cols(fcols_path)
 
-    # --- scaler ---
+                    
     scal_path = adir / "scaler.json"
     scaler = FeatureScaler.load(scal_path)
 
-    # --- meta ---
+                  
     meta_path = adir / "meta.json"
     meta: Dict[str, Any] = {}
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-    # --- model ---
+                   
     mdl: Optional[nn.Module] = None
     pt_path = adir / "ranker.pt"
 
@@ -101,25 +101,25 @@ def load_artifacts(
             mdl.to(dev)
             mdl.load_state_dict(state, strict=False)
         elif isinstance(obj, dict):
-            # возможно, это просто state_dict
+                                             
             mdl = make_model(len(feature_cols))
             mdl.to(dev)
             mdl.load_state_dict(obj, strict=False)
         else:
-            # torch.save(model) — редкий случай; пробуем напрямую
+                                                                 
             mdl = obj
             mdl.to(dev)
         if hasattr(mdl, "eval"):
             mdl.eval()
     else:
-        mdl = None  # позволим работать без торча/модели (например, только нормализация и отладка)
+        mdl = None                                                                                
 
     return Artifacts(model=mdl, scaler=schk(scaler), feature_cols=feature_cols, meta=meta, device=dev)
 
 
-# =====================================================================================
-#                              Модель по умолчанию (MLP)
-# =====================================================================================
+                                                                                       
+                                                        
+                                                                                       
 
 class _DefaultMLP(nn.Module):
     """Простой MLP-скорер на случай, если не передали make_model.
@@ -135,14 +135,14 @@ class _DefaultMLP(nn.Module):
         layers += [nn.Linear(prev, 1)]
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (N, D) -> (N,)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:                  
         out = self.net(x)
         return out.squeeze(-1)
 
 
-# =====================================================================================
-#                             Построение матрицы/симуляций
-# =====================================================================================
+                                                                                       
+                                                          
+                                                                                       
 
 def _make_meta(df: pd.DataFrame) -> Dict[str, Any]:
     """Мини-мета как в featureset.build_matrix, но без лишних вычислений."""
@@ -189,9 +189,9 @@ def build_sim_frame(
     return df
 
 
-# =====================================================================================
-#                              Инференс: скоринг/ранжирование
-# =====================================================================================
+                                                                                       
+                                                             
+                                                                                       
 
 def apply_temperature(scores: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     t = float(temperature)
@@ -247,7 +247,7 @@ def attach_win_probs(
         out[prob_col] = probs
         return out
 
-    # по гонкам
+               
     out[prob_col] = 0.0
     for _, idx in out.groupby(list(by)).indices.items():
         sc = out.loc[idx, "score"].to_numpy(dtype=np.float32)
@@ -281,7 +281,7 @@ def make_ranking_df(
     else:
         out = df.groupby(list(by), group_keys=False).apply(_rank_one)
 
-    # лёгкая перестановка колонок (без дублей)
+                                              
     lead: List[str] = []
     for c in [*(order_cols or []), *key_cols]:
         if c in out.columns and c not in lead:
@@ -315,9 +315,9 @@ def predict_custom(
     return rank_df
 
 
-# =====================================================================================
-#                                    Раннер
-# =====================================================================================
+                                                                                       
+                                           
+                                                                                       
 
 class InferenceRunner:
     """Упрощённый раннер для инференса: хранит артефакты и предоставляет удобные методы."""
@@ -335,9 +335,9 @@ class InferenceRunner:
     def rank(self, df: pd.DataFrame, temperature: Optional[float] = None, by: Sequence[str] = ("year", "round"), include_probs: bool = True, ascending: bool = False) -> pd.DataFrame:
         return predict_custom(self.artifacts, df, temperature=temperature, by=by, include_probs=include_probs, ascending=ascending)
     
-    # -----------------------------
-    # Back-compat helpers (旧 API)
-    # -----------------------------
+                                   
+                                 
+                                   
     @property
     def feature_columns(self) -> List[str]:
         """Совместимость со старыми скриптами: alias на artifacts.feature_cols."""
@@ -348,9 +348,9 @@ class InferenceRunner:
         return predict_scores(self.artifacts, df)
 
 
-# =====================================================================================
-#                                     Sanity
-# =====================================================================================
+                                                                                       
+                                            
+                                                                                       
 
 def schk(scaler: FeatureScaler) -> FeatureScaler:
     """Простая проверка размерностей скейлера."""

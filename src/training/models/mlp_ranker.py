@@ -1,62 +1,62 @@
-# # FILE: src/training/models/mlp_ranker.py
-# from __future__ import annotations
+                                           
+                                    
 
-# from typing import Iterable, List
-# import torch
-# import torch.nn as nn
-
-
-# class Ranker(nn.Module):
-#     """
-#     MLP → scalar score. Используется как "скорер" для ранжирования пилотов внутри гонки.
-
-#     Args:
-#         in_dim:   размерность входного признакового вектора
-#         hidden:   список скрытых слоёв, например [256, 128]
-#         dropout:  dropout после каждого скрытого слоя
-#     """
-#     def __init__(self, in_dim: int, hidden: Iterable[int] = (256, 128), dropout: float = 0.10):
-#         super().__init__()
-#         hidden = list(hidden) if hidden is not None else []
-#         dims: List[int] = [in_dim] + hidden + [1]
-
-#         layers: List[nn.Module] = []
-#         for i in range(len(dims) - 2):
-#             layers.append(nn.Linear(dims[i], dims[i + 1]))
-#             layers.append(nn.ReLU())
-#             if dropout and dropout > 0:
-#                 layers.append(nn.Dropout(dropout))
-#         layers.append(nn.Linear(dims[-2], dims[-1]))  # финальный скор
-
-#         self.net = nn.Sequential(*layers)
-#         self.apply(self._init_weights)
-
-#     @staticmethod
-#     def _init_weights(m: nn.Module):
-#         if isinstance(m, nn.Linear):
-#             nn.init.kaiming_uniform_(m.weight, a=0.01, nonlinearity="relu")
-#             if m.bias is not None:
-#                 nn.init.zeros_(m.bias)
-
-#     def forward(self, X: torch.Tensor) -> torch.Tensor:
-#         """
-#         X: [N, F] → scores: [N]
-#         """
-#         s = self.net(X).squeeze(-1)
-#         return s
+                                   
+              
+                       
 
 
-# def make_model(in_dim: int, hidden: Iterable[int] = (256, 128), dropout: float = 0.10) -> Ranker:
-#     """
-#     Фабричная функция для совместимости с конфигом/скриптами.
-#     """
-#     return Ranker(in_dim=in_dim, hidden=list(hidden) if hidden is not None else [], dropout=dropout)
+                          
+         
+                                                                                          
+
+           
+                                                             
+                                                             
+                                                       
+         
+                                                                                                 
+                            
+                                                             
+                                                   
+
+                                      
+                                        
+                                                            
+                                      
+                                         
+                                                    
+                                                                        
+
+                                           
+                                        
+
+                   
+                                      
+                                      
+                                                                             
+                                    
+                                        
+
+                                                         
+             
+                                 
+             
+                                     
+                  
 
 
-# __all__ = ["Ranker", "make_model"]
+                                                                                                   
+         
+                                                               
+         
+                                                                                                      
 
 
-# FILE: src/training/models/advanced_ranker.py
+                                    
+
+
+                                              
 from __future__ import annotations
 from typing import Iterable, List, Optional
 import math
@@ -80,7 +80,7 @@ class StochasticDepth(nn.Module):
         if not self.training or self.p == 0.0:
             return x
         keep = 1.0 - self.p
-        # Бернулли по батчу (broadcast по фичам)
+                                                
         mask = torch.rand((x.shape[0],) + (1,) * (x.ndim - 1), device=x.device, dtype=x.dtype) < keep
         return x * mask / keep
 
@@ -126,15 +126,15 @@ class ResidualBlock(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        # Инициализация, устойчивая к SiLU/GELU: xavier для проекций, kaiming для линейных.
+                                                                                           
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                # GEGLU.proj мы не трогаем здесь (он внутри отдельного модуля),
-                # а для остальных линеек:
+                                                                               
+                                         
                 nn.init.kaiming_uniform_(m.weight, a=0.0, nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # Для GEGLU — xavier на общей проекции
+                                              
         if isinstance(self.ff[0], GEGLU):
             proj = self.ff[0].proj
             nn.init.xavier_uniform_(proj.weight)
@@ -184,7 +184,7 @@ class AdvancedRanker(nn.Module):
         blocks: List[nn.Module] = []
         L = len(dims) - 1
         for i in range(L):
-            p = droppath * float(i + 1) / float(L) if droppath and L > 0 else 0.0  # линейный градиент DropPath
+            p = droppath * float(i + 1) / float(L) if droppath and L > 0 else 0.0                              
             blocks.append(
                 ResidualBlock(
                     in_dim=dims[i],

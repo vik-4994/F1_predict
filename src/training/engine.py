@@ -1,4 +1,4 @@
-# src/training/engine.py
+                        
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Any
 import json
 import math
-import hashlib  # for feature_cols hash
+import hashlib                         
 
 import numpy as np
 import torch
@@ -19,9 +19,9 @@ from .losses import PlackettLuceLoss, plackett_luce_nll
 from .metrics import metrics_for_race, aggregate_metrics
 from .featureset import FeatureScaler, save_feature_cols, load_feature_cols
 
-# -------------------------
-# Core train/eval routines
-# -------------------------
+                           
+                          
+                           
 
 @torch.no_grad()
 def _forward_scores(model: nn.Module, X: torch.Tensor, device: str = "cpu") -> torch.Tensor:
@@ -36,16 +36,16 @@ def train_one_epoch(model, dataset, optimizer, device="cpu", batch_size: int = 1
     running = 0.0
     n = 0
 
-    for races in dl:  # collate возвращает список гонок
+    for races in dl:                                   
         for item in races:
             X = torch.as_tensor(item["X"], dtype=torch.float32, device=device)
             order = torch.as_tensor(item["order"], dtype=torch.long, device=device)
 
             optimizer.zero_grad(set_to_none=True)
 
-            # ВАЖНО: никаких in-place с outputs!
-            scores = model(X)                 # (N,)
-            loss = loss_fn(scores, order)     # только чистые функциональные операции
+                                                
+            scores = model(X)                       
+            loss = loss_fn(scores, order)                                            
 
             loss.backward()
             optimizer.step()
@@ -53,11 +53,11 @@ def train_one_epoch(model, dataset, optimizer, device="cpu", batch_size: int = 1
             running += float(loss.detach().cpu())
             n += 1
 
-            # Если хотите посчитать метрики на train — делайте это только на detached-копии
-            # и под no_grad(), и НИЧЕГО in-place:
-            # with torch.no_grad():
-            #     pred_order = torch.argsort(scores.detach(), descending=True)
-            #     _ = metrics_for_race(scores.detach(), order)
+                                                                                           
+                                                 
+                                   
+                                                                              
+                                                              
 
     return running / max(n, 1)
 
@@ -98,9 +98,9 @@ def evaluate(
     }
 
 
-# -------------------------
-# Checkpointing / artifacts
-# -------------------------
+                           
+                           
+                           
 
 def _sha1_of_list(xs: List[str]) -> str:
     h = hashlib.sha1()
@@ -127,27 +127,27 @@ def save_checkpoint(
     adir = Path(artifacts_dir)
     adir.mkdir(parents=True, exist_ok=True)
 
-    # модель
+            
     torch.save(model.state_dict(), adir / "ranker.pt")
 
-    # скейлер
+             
     scaler.save(adir / "scaler.json")
 
-    # фичи (порядок важен!)
+                           
     save_feature_cols(adir / "feature_cols.txt", feature_cols)
 
-    # метаданные
+                
     meta_out: Dict[str, Any] = dict(meta or {})
-    # полезные поля по умолчанию
+                                
     meta_out.setdefault("in_dim", int(len(feature_cols)))
     meta_out.setdefault("num_features", int(len(feature_cols)))
     meta_out.setdefault("feature_cols_sha1", _sha1_of_list(list(feature_cols)))
-    # число параметров модели (для контроля совместимости)
+                                                          
     try:
         meta_out.setdefault("num_params", int(sum(p.numel() for p in model.parameters())))
     except Exception:
         pass
-    # если модель содержит подсказки по конфигу — сохраним
+                                                          
     for k in ("hidden", "dropout"):
         if k not in meta_out and hasattr(model, k):
             try:
@@ -175,7 +175,7 @@ def load_checkpoint(
     feature_cols = load_feature_cols(adir / "feature_cols.txt")
     scaler = FeatureScaler.load(adir / "scaler.json")
 
-    # параметры модели из meta (бэкенд-совместимость)
+                                                     
     in_dim = meta.get("in_dim", len(feature_cols))
     hidden = meta.get("hidden", [256, 128])
     dropout = meta.get("dropout", 0.10)
@@ -188,9 +188,9 @@ def load_checkpoint(
     return model, scaler, feature_cols, meta
 
 
-# -------------------------
-# Pretty logging helper
-# -------------------------
+                           
+                       
+                           
 
 def format_metrics(epoch: int, train_loss: float, val_mean: Dict[str, float]) -> str:
     sp = val_mean.get("spearman", float("nan"))

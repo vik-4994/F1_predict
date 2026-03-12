@@ -1,4 +1,4 @@
-# FILE: src/training/metrics.py
+                               
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -14,7 +14,7 @@ except Exception:
 ArrayLike = Union[np.ndarray, "torch.Tensor", Sequence[float], Sequence[int]]
 
 
-# ---------- helpers ----------
+                               
 
 def _to_numpy(x: ArrayLike) -> np.ndarray:
     if _HAS_TORCH and isinstance(x, torch.Tensor):
@@ -51,10 +51,10 @@ def spearmanr_from_ranks(a_ranks: ArrayLike, b_ranks: ArrayLike) -> float:
     b = _to_numpy(b_ranks).astype(np.float64)
     if a.size < 2:
         return float("nan")
-    # handle constant ranks safely
+                                  
     if np.all(a == a[0]) or np.all(b == b[0]):
         return float("nan")
-    # Pearson correlation of ranks
+                                  
     a = (a - a.mean()) / (a.std() + 1e-12)
     b = (b - b.mean()) / (b.std() + 1e-12)
     return float(np.clip((a * b).mean(), -1.0, 1.0))
@@ -95,12 +95,12 @@ def ndcg_at_k(pred_scores: ArrayLike, true_ranks: ArrayLike, k: Optional[int] = 
     if k is None or k > N:
         k = N
 
-    # relevance: higher for better (rank=1 → rel=1, rank=N → rel≈1/N)
+                                                                     
     rel = 1.0 / tr
-    # predicted order
+                     
     idx = np.argsort(-s)
     rel_pred = rel[idx][:k]
-    # ideal order
+                 
     idx_ideal = np.argsort(-rel)
     rel_ideal = rel[idx_ideal][:k]
 
@@ -113,7 +113,7 @@ def ndcg_at_k(pred_scores: ArrayLike, true_ranks: ArrayLike, k: Optional[int] = 
     return float(dcg / idcg)
 
 
-# ---------- per-race wrapper ----------
+                                        
 
 def metrics_for_race(pred_scores: ArrayLike, true_order: ArrayLike) -> Dict[str, float]:
     """
@@ -138,7 +138,7 @@ def metrics_for_race(pred_scores: ArrayLike, true_order: ArrayLike) -> Dict[str,
     }
 
 
-# ---------- aggregate across races ----------
+                                              
 
 def aggregate_metrics(per_race: List[Dict[str, float]]) -> Dict[str, float]:
     """

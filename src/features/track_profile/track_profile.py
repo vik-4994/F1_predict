@@ -33,15 +33,19 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# Локальные импорты из пакета фич
+                                 
 try:
     from ..utils import ensure_driver_index
     from ..track_onehot import (
         _event_slug_from_meta, _event_name_from_meta, _event_name_from_races_df,
         _ensure_driver_list, _slugify,
     )
+    from .track_catalog import (
+        TrackProfile, DEFAULT_PROFILE, TRACK_TO_PROFILE,
+        normalize_track_slug
+    )
 except Exception:
-    # Фоллбэки на случай прямого запуска
+                                        
     from utils import ensure_driver_index  # type: ignore
     def _slugify(s: str) -> str:  # type: ignore
         import re, unicodedata
@@ -57,50 +61,9 @@ except Exception:
     def _ensure_driver_list(ctx, raw_dir: Path, year: int, rnd: int):  # type: ignore
         return []
 
-# -------------------- статические профили --------------------
+                                                               
 
-@dataclass(frozen=True)
-class TrackProfile:
-    straight_pct: float                 # доля прямых участков, 0..1
-    fast_corner_ratio: float            # доля быстрых поворотов, 0..1
-    lap_km: float                       # длина круга, км
-    braking_ev_per_lap: float           # тяжелые торможения за круг
-    drs_zones: float                    # число DRS‑зон
-    tdeg_index: float                   # индекс деградации шин, 0..1
-    aero_df_index: float                # требуемая прижимная сила, 0..1
-    # опциональные (можно не задавать — будут оценены эвристикой)
-    pit_loss_s: Optional[float] = None              # потеря на пите (стоп + проезд), с
-    fuel_effect_s_per10kg: Optional[float] = None   # штраф за 10 кг топлива, с
-
-# Минимальный набор для старта (ориентировочные индексы)
-TRACK_TO_PROFILE: Dict[str, TrackProfile] = {
-    # Спа‑Франкоршам
-    "belgian_grand_prix": TrackProfile(
-        straight_pct=0.58, fast_corner_ratio=0.55, lap_km=7.004, braking_ev_per_lap=7,
-        drs_zones=2, tdeg_index=0.65, aero_df_index=0.70,
-        pit_loss_s=21.0, fuel_effect_s_per10kg=0.23,
-    ),
-    # Монца
-    "italian_grand_prix": TrackProfile(
-        straight_pct=0.70, fast_corner_ratio=0.30, lap_km=5.793, braking_ev_per_lap=8,
-        drs_zones=2, tdeg_index=0.45, aero_df_index=0.30,
-        pit_loss_s=18.5, fuel_effect_s_per10kg=0.20,
-    ),
-    # Сузука
-    "japanese_grand_prix": TrackProfile(
-        straight_pct=0.52, fast_corner_ratio=0.65, lap_km=5.807, braking_ev_per_lap=6,
-        drs_zones=1, tdeg_index=0.60, aero_df_index=0.85,
-        pit_loss_s=19.5, fuel_effect_s_per10kg=0.22,
-    ),
-    "singapore_grand_prix": TrackProfile(
-        straight_pct=0.18, fast_corner_ratio=0.10, lap_km=4.94, braking_ev_per_lap=9,
-        drs_zones=2, tdeg_index=0.62, aero_df_index=0.85,
-        pit_loss_s=24.0, fuel_effect_s_per10kg=0.20,
-    ),
-
-}
-
-# Кластера трасс (упрощённо)
+                            
 TRACK_TO_CLUSTER: Dict[str, str] = {
     "belgian_grand_prix": "balanced",
     "italian_grand_prix": "low_df",
@@ -117,7 +80,7 @@ DEFAULT_PROFILE = TrackProfile(
     pit_loss_s=19.0, fuel_effect_s_per10kg=0.21,
 )
 
-# -------------------- utils --------------------
+                                                 
 
 def _event_slug_from_ctx(ctx) -> Optional[str]:
     if isinstance(ctx, dict):
@@ -129,11 +92,11 @@ def _event_slug_from_ctx(ctx) -> Optional[str]:
 
 
 def _detect_slug(raw_dir: Path, year: int, rnd: int, ctx) -> Optional[str]:
-    # 1) из ctx (custom mode)
+                             
     s = _event_slug_from_ctx(ctx)
     if s:
         return s
-    # 2) из meta_* (предпочтительно)
+                                    
     s = _event_slug_from_meta(raw_dir, year, rnd)
     if s:
         return s
@@ -232,25 +195,28 @@ def _maybe_load_csv_profiles(raw_dir: Path) -> Tuple[Dict[str, TrackProfile], Di
                     clusters[slug] = cl
     return profiles, clusters
 
-# -------------------- API --------------------
+                                               
 
 def featurize(ctx: dict) -> pd.DataFrame:
     raw_dir = Path(ctx.get("raw_dir"))
     year = int(ctx.get("year"))
     rnd = int(ctx.get("round"))
+    emit = str(ctx.get("track_emit", "full")).lower()
+    emit_cluster = bool(ctx.get("track_emit_cluster", True))
 
     drivers = _ensure_driver_list(ctx, raw_dir, year, rnd)
     if not drivers:
         return pd.DataFrame()
 
-    slug = _detect_slug(raw_dir, year, rnd, ctx) or ""
+    slug_raw = _detect_slug(raw_dir, year, rnd, ctx) or ctx.get("track") or ""
+    slug = normalize_track_slug(slug_raw)
 
     csv_prof, csv_cl = _maybe_load_csv_profiles(raw_dir)
 
     p = csv_prof.get(slug) or TRACK_TO_PROFILE.get(slug) or DEFAULT_PROFILE
     cluster = csv_cl.get(slug) or TRACK_TO_CLUSTER.get(slug) or "balanced"
 
-    base = {
+    base_full = {
         "track_slug": slug or "unknown",
         "track_straight_pct": float(p.straight_pct),
         "track_fast_corner_ratio": float(p.fast_corner_ratio),
@@ -263,9 +229,48 @@ def featurize(ctx: dict) -> pd.DataFrame:
         "track_cluster_id": float(CLUSTER_ID.get(cluster, 1)),
     }
     for k in CLUSTERS:
-        base[f"track_cluster_{k}"] = float(cluster == k)
+        base_full[f"track_cluster_{k}"] = float(cluster == k)
+    base_full.update(_compose_derived(p))                                                                               
 
-    base.update(_compose_derived(p))
+                      
+    if emit == "full":
+        base = dict(base_full)
+    elif emit == "std":
+        drop_n = {
+            "track_straight_n","track_fast_corner_n","track_braking_n",
+            "track_drs_n","track_lap_n","track_tdeg_n","track_aero_df_n",
+        }
+        base = {k: v for k, v in base_full.items() if k not in drop_n}
+        base.pop("track_cluster_id", None)                                                                           
+        base.pop("track_slug", None)                              
+    elif emit == "min":
+        keep = {
+                                          
+            "track_power_vs_df_index",                        
+            "track_tdeg_index",                         
+            "track_pit_loss_s",                             
+            "track_overtake_index",                       
+            "track_straight_pct",                        
+            "track_lap_km",                              
+        }
+        base = {k: v for k, v in base_full.items() if k in keep}
+                                 
+        base.pop("track_slug", None)
+        base.pop("track_cluster_id", None)
+        base.pop("track_cluster", None)
+    else:
+        base = dict(base_full)
+
+                               
+    if emit_cluster:
+        for k in CLUSTERS:
+            base[f"track_cluster_{k}"] = float(cluster == k)
+    else:
+        for k in list(base.keys()):
+            if k.startswith("track_cluster_"):
+                base.pop(k, None)
+        base.pop("track_cluster", None)
+        base.pop("track_cluster_id", None)
 
     for k, v in list(base.items()):
         if isinstance(v, (int, float, np.floating)):

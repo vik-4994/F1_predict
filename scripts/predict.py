@@ -1,4 +1,4 @@
-# scripts/predict.py
+                    
 from __future__ import annotations
 
 import argparse
@@ -12,9 +12,9 @@ import torch
 
 pd.set_option("mode.copy_on_write", True)
 
-# наш раннер инференса (см. .from_dir/.rank)
+                                            
 from src.training.inference import InferenceRunner
-from features.track_profile.track_profile import TRACK_TO_PROFILE, TRACK_TO_CLUSTER, DEFAULT_PROFILE
+from src.features.track_profile.track_profile import TRACK_TO_PROFILE, TRACK_TO_CLUSTER, DEFAULT_PROFILE
 from src.features.driver_track_cluster_pre import featurize as driver_trackc_featurize
 
 ALPHA_NUM = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -26,7 +26,7 @@ def _load_artifact_scaler(artifacts_dir: Path):
         return None
     with open(sj, "r") as f:
         obj = json.load(f)
-    # ожидаем форматы {'mean': [...], 'std': [...], 'feature_cols': [...] } или отдельно feature_cols.txt
+                                                                                                         
     return obj
 
 def _to_tensor(X: np.ndarray, device=None):
@@ -58,12 +58,12 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
         print("[warn] PyTorch unavailable; --explain disabled", file=sys.stderr)
         return
 
-    from src.training.featureset import transform_with_scaler_df  # тот же трансформер, что в инференсе
+    from src.training.featureset import transform_with_scaler_df                                       
 
-    # 1) порядок признаков берём из раннера/артефактов
+                                                      
     feat_cols = list(getattr(runner, "feature_columns", runner.artifacts.feature_cols))
 
-    # 2) берём строки по нужным драйверам в заданном порядке
+                                                            
     present = set(df["Driver"].astype(str))
     drivers = [d for d in drivers if d in present]
     if not drivers:
@@ -71,10 +71,10 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
         return
     sub = df.set_index("Driver").loc[drivers, :].copy()
 
-    # 3) стандартизируем ровно как в инференсе
+                                              
     X = transform_with_scaler_df(sub, feat_cols, runner.artifacts.scaler, as_array=True).astype(np.float32, copy=False)
 
-    # 4) модель берём из артефактов раннера
+                                           
     model = runner.artifacts.model
     if model is None:
         print("[warn] No model in artifacts; cannot compute explanations.", file=sys.stderr)
@@ -82,12 +82,12 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
     model.eval()
 
     device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    xt = _to_tensor(X, device=device)  # [D,F], requires_grad=True
+    xt = _to_tensor(X, device=device)                             
 
     with torch.enable_grad():
-        scores = model(xt)  # [D]
+        scores = model(xt)       
 
-    # 5) градиенты и вклад grad*input
+                                     
     grads = []
     for i in range(xt.shape[0]):
         model.zero_grad(set_to_none=True)
@@ -95,40 +95,40 @@ def _explain_drivers(runner, artifacts_dir: Path, df: pd.DataFrame,
             xt.grad.zero_()
         scores[i].backward(retain_graph=True)
         grads.append(xt.grad[i].detach().cpu().numpy().copy())
-    grad = np.vstack(grads)                              # [D,F]
-    contrib = grad * xt.detach().cpu().numpy()           # grad*input (в стандартизированном пространстве)
+    grad = np.vstack(grads)                                     
+    contrib = grad * xt.detach().cpu().numpy()                                                            
 
-    # 6) what-if: прибиваем фичу к среднему (z=0) и смотрим Δscore
+                                                                  
     with torch.no_grad():
-        base = model(xt).detach().cpu().numpy()          # [D]
+        base = model(xt).detach().cpu().numpy()               
     deltas = np.zeros_like(contrib, dtype=np.float32)
     for j in range(X.shape[1]):
         X_mut = xt.detach().clone()
-        X_mut[:, j] = 0.0                                # 0 ⇒ (value-mean)/std = 0
+        X_mut[:, j] = 0.0                                                          
         with torch.no_grad():
             s_mut = model(X_mut).detach().cpu().numpy()
         deltas[:, j] = base - s_mut
 
-    # 7) печать топов
+                     
     for idx, drv in enumerate(drivers):
         print(f"\n=== EXPLAIN {drv} ===")
         z = xt[idx].detach().cpu().numpy()
         topn_eff = min(topn, len(feat_cols))
 
-        # [A] |z|
+                 
         topz = np.argsort(-np.abs(z))[:topn_eff]
         print("[A] top |z-score| features")
         for j in topz:
             print(f"  {feat_cols[j]:40s}  z={z[j]:+7.3f}")
 
-        # [B] grad*input
+                        
         c = contrib[idx]
         topc = np.argsort(-np.abs(c))[:topn_eff]
         print("[B] top grad*input (локальная важность)")
         for j in topc:
             print(f"  {feat_cols[j]:40s}  g*x={c[j]:+9.5f}")
 
-        # [C] Δscore при приведении к среднему
+                                              
         d = deltas[idx]
         topd = np.argsort(-np.abs(d))[:topn_eff]
         print("[C] top Δscore if set to mean")
@@ -285,11 +285,11 @@ def _apply_grid(df: pd.DataFrame, grid_map: Dict[str, float]) -> None:
             print(f"[warn] driver '{drv}' not present in current DF; grid ignored")
 
 def _astype_floatwise(df: pd.DataFrame) -> None:
-    # Приводим только плавающие к float32; int оставляем как int (исключит предупреждения)
+                                                                                          
     for c in df.columns:
         if pd.api.types.is_float_dtype(df[c]):
             df.loc[:, c] = df[c].astype(np.float32, copy=False)
-        # pandas 'boolean' → float32 при необходимости
+                                                      
         elif str(df[c].dtype) == "boolean":
             df.loc[:, c] = df[c].astype(np.float32, copy=False)
 
@@ -320,21 +320,21 @@ def _apply_grid_weight(rank_df: pd.DataFrame,
     if grid_weight <= 0:
         return rank_df
 
-    # соберём карту стартов
+                           
     gmap = _build_grid_pos_map(df_features, user_grid_map)
     if not gmap:
-        # нечем приземлять
+                          
         return rank_df
 
     df = rank_df.copy()
     df["__grid_pos__"] = df["Driver"].map(gmap)
-    # дефолт на случай отсутствия — 10 позиция
+                                              
     df["__grid_pos__"] = df["__grid_pos__"].fillna(10.0)
 
-    # корректируем скор
+                       
     df["score"] = df["score"] - float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
 
-    # пересчёт вероятностей и рангов по группам
+                                               
     gb = list(groupby) if groupby else []
     if gb and all(c in df.columns for c in gb):
         def _recalc(g: pd.DataFrame) -> pd.DataFrame:
@@ -359,14 +359,14 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     features_pq = Path(args.features)
 
-    # 1) читаем фичи
+                    
     base_df = pd.read_parquet(features_pq)
 
-    # 2) фильтр по драйверам
+                            
     drivers = [d.strip() for d in args.drivers.split(",") if d.strip()]
     df = base_df.loc[base_df["Driver"].isin(drivers)].reset_index(drop=True).copy()
 
-    # 3) схлопываем до одной строки на пилота (берём самую свежую запись по year,round)
+                                                                                       
     if "year" in df.columns and "round" in df.columns:
         df["year"] = pd.to_numeric(df["year"], errors="coerce")
         df["round"] = pd.to_numeric(df["round"], errors="coerce")
@@ -379,33 +379,33 @@ def main(argv: Optional[List[str]] = None) -> None:
     else:
         df = df.drop_duplicates("Driver", keep="last").reset_index(drop=True)
 
-    # 4) выставляем target гонку (типы оставляем int)
+                                                     
     if "year" in df.columns:
         df.loc[:, "year"] = np.int32(args.sim_year)
     if "round" in df.columns:
         df.loc[:, "round"] = np.int32(args.sim_round)
 
-    # 5) трек/погода/грид
+                         
     _apply_track_onehot(df, args.track)
     _apply_weather(df, json.loads(args.weather_json) if args.weather_json else {})
     grid_map = _parse_grid(args.grid)
-    _apply_grid(df, grid_map)  # запишем в фичи, если там есть колонка грида
+    _apply_grid(df, grid_map)                                               
 
-    # 6) типы: только float-колонки → float32 (не трогаем year/round)
+                                                                     
     _astype_floatwise(df)
-    df = df.copy()  # дефрагментация
+    df = df.copy()                  
 
-    # 7) инференс
+                 
     runner = InferenceRunner.from_dir(args.artifacts)
     rank_df = runner.rank(
         df,
         temperature=float(args.tau),
-        by=("year", "round"),   # группировка по гонке, softmax и ранги внутри
+        by=("year", "round"),                                                 
         include_probs=True,
         ascending=False,
     )
 
-    # 8) применяем приземлятор от грида и пересчитываем вероятности/ранги
+                                                                         
     rank_df = _apply_grid_weight(
         rank_df=rank_df,
         df_features=df,
@@ -416,10 +416,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         beta=0.25,
     )
 
-    # 9) печать (используем готовые колонки rank/score/p_win)
+                                                             
     pretty_print_table(rank_df, topk=int(args.topk), cols_mode=args.cols)
 
-    # 10) explain (если нужен)
+                              
     if args.explain:
         exp_list = [s.strip() for s in args.explain.split(",") if s.strip()]
         exp_list = [d for d in exp_list if d in set(df["Driver"].tolist())]

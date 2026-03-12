@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import math
 
-# ---------------------------- utils & constants ----------------------------
+                                                                             
 
 NUMERIC_TIME_COLS = (
     "LapTime_s", "LapTimeSec", "LapTimeSeconds", "LapTime",
@@ -45,7 +45,7 @@ DRIVER_COL_CANDS = ("Driver", "Abbreviation", "code", "driverRef", "DriverRef", 
 ROSTER_FILES_ORDER = (
     "entrylist_{y}_{r}_Q.csv",
     "entrylist_{y}_{r}.csv",
-    "results_{y}_{r}_Q.csv",  # fallback only
+    "results_{y}_{r}_Q.csv",                 
 )
 
 META_FILES_ORDER = (
@@ -68,7 +68,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
 def _to_seconds(series: pd.Series) -> pd.Series:
     """Best-effort convert lap time-like values to seconds (float)."""
     s = series.copy()
-    # If timedelta-like strings, let pandas parse
+                                                 
     try:
         td = pd.to_timedelta(s, errors="coerce")
         if td.notna().any():
@@ -77,7 +77,7 @@ def _to_seconds(series: pd.Series) -> pd.Series:
                 return sec
     except Exception:
         pass
-    # Heuristic: if looks like ms, divide
+                                         
     s = pd.to_numeric(s, errors="coerce")
     med = s.replace([np.inf, -np.inf], np.nan).median()
     if pd.notna(med) and med > 1e3:
@@ -129,7 +129,7 @@ def _read_first(paths: Sequence[Path]) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# ---------- calendar helpers (works even without races_df) ----------
+                                                                      
 def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
     rr = set()
     for pat in ("results_*.csv", "laps_*.csv", "entrylist_*.csv", "results_*_Q.csv", "entrylist_*_Q.csv",
@@ -170,9 +170,9 @@ def _list_past_races_by_scan(raw_dir: Path, year: int, rnd: int, max_lookback: i
     return past[:max_lookback]
 
 
-# ---------- roster ----------
+                              
 def _load_roster(raw_dir: Path, year: int, rnd: int, races_df: Optional[pd.DataFrame]) -> List[str]:
-    # Prefer target entrylist (safe)
+                                    
     for pat in ROSTER_FILES_ORDER:
         df = _read_csv(raw_dir / pat.format(y=year, r=rnd))
         if not df.empty:
@@ -182,8 +182,8 @@ def _load_roster(raw_dir: Path, year: int, rnd: int, races_df: Optional[pd.DataF
                         .replace({"nan": np.nan}).dropna().drop_duplicates().tolist())
                 if vals:
                     return vals
-    # Fallback: previous rounds (calendar or scan)
-    prev = _list_past_races_by_df(races_df, year, rnd, max_lookback=5) if races_df is not None else \
+                                                  
+    prev = _list_past_races_by_df(races_df, year, rnd, max_lookback=5) if races_df is not None else\
            _list_past_races_by_scan(raw_dir, year, rnd, max_lookback=5)
     for (y, r) in prev:
         for pat in ROSTER_FILES_ORDER:
@@ -198,10 +198,10 @@ def _load_roster(raw_dir: Path, year: int, rnd: int, races_df: Optional[pd.DataF
     return []
 
 
-# ---------- telemetry per race ----------
+                                          
 def _load_telemetry_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     """Return per-driver telemetry summary for a past race (best lap seconds, top speed)."""
-    # 1) aggregate telemetry
+                            
     agg = _read_first([
         raw_dir / f"telemetry_agg_{y}_{r}.csv",
         raw_dir / f"telemetry_{y}_{r}.csv",
@@ -210,15 +210,15 @@ def _load_telemetry_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     agg = _ensure_driver(agg)
     if not agg.empty:
         out = agg[[c for c in agg.columns if c in ("Driver",) + NUMERIC_TIME_COLS + TOPSPEED_COLS]].copy()
-        # best lap time column
+                              
         tcol = next((c for c in NUMERIC_TIME_COLS if c in out.columns), None)
         out["best_lap_s"] = _to_seconds(out[tcol]) if tcol else np.nan
-        # top speed
+                   
         tscol = next((c for c in TOPSPEED_COLS if c in out.columns), None)
         out["top_speed_kph"] = pd.to_numeric(out.get(tscol, np.nan), errors="coerce")
         return out[["Driver", "best_lap_s", "top_speed_kph"]]
 
-    # 2) per-driver telemetry files: telemetry_{y}_{r}_*.csv
+                                                            
     rows = []
     for p in raw_dir.glob(f"telemetry_{y}_{r}_*.csv"):
         t = _ensure_driver(_read_csv(p))
@@ -233,7 +233,7 @@ def _load_telemetry_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     if rows:
         return pd.DataFrame(rows)
 
-    # 3) laps fallback
+                      
     laps = _read_first([
         raw_dir / f"laps_{y}_{r}.csv",
         raw_dir / f"laps_{y}_{r}_R.csv",
@@ -303,11 +303,11 @@ def _featurize_impl(
     raw_dir = Path(raw_dir)
     opt = options or FeaturizeOptions()
 
-    # 1) Roster (pre-race safe)
+                               
     drivers = list(roster) if roster else _load_roster(raw_dir, year, rnd, races_df)
 
-    # 2) Past races
-    past = _list_past_races_by_df(races_df, year, rnd, max_lookback=opt.max_lookback) if races_df is not None else \
+                   
+    past = _list_past_races_by_df(races_df, year, rnd, max_lookback=opt.max_lookback) if races_df is not None else\
            _list_past_races_by_scan(raw_dir, year, rnd, max_lookback=opt.max_lookback)
 
     if not past:
@@ -318,7 +318,7 @@ def _featurize_impl(
 
     target_slug = _event_slug_from_meta(raw_dir, year, rnd)
 
-    # 3) Collect per-race telemetry summaries
+                                             
     rows: List[pd.DataFrame] = []
     for (y, r) in past:
         df = _load_telemetry_for_race(raw_dir, y, r)
@@ -342,17 +342,17 @@ def _featurize_impl(
     hist["top_speed_kph"] = pd.to_numeric(hist["top_speed_kph"], errors="coerce")
     hist = hist.dropna(subset=["Driver"])
 
-    # 4) Field-normalized pace z per race
+                                         
     hist = hist.sort_values(["year", "round"]).reset_index(drop=True)
     hist["race_id"] = hist["year"].astype(str) + ":" + hist["round"].astype(str)
     z_list = []
     for _, g in hist.groupby("race_id", sort=False):
-        z = _zscore_inv(g["best_lap_s"])  # higher is better
+        z = _zscore_inv(g["best_lap_s"])                    
         z.index = g.index
         z_list.append(z)
     hist["pace_z"] = pd.concat(z_list).sort_index()
 
-    # 5) Aggregate per driver
+                             
     def _agg_driver(g: pd.DataFrame) -> pd.Series:
         g = g.dropna(subset=["best_lap_s"])
         if g.empty:
@@ -361,7 +361,7 @@ def _featurize_impl(
         if "same_track" in g.columns:
             w = w + opt.same_track_bonus * g["same_track"].to_numpy(dtype=float)
         w = w / w.sum()
-        # robust percentiles via numpy
+                                      
         arr = g["best_lap_s"].to_numpy(dtype=float)
         best_p50 = float(np.nanpercentile(arr, 50))
         iqr = float(np.nanpercentile(arr, 75) - np.nanpercentile(arr, 25))
@@ -385,7 +385,7 @@ def _featurize_impl(
 
     agg = hist.groupby("Driver", dropna=False).apply(_agg_driver, include_groups=False).reset_index()
 
-    # 6) Align to roster & fill defaults
+                                        
     if drivers:
         base = pd.DataFrame({"Driver": drivers})
         out = base.merge(agg, on="Driver", how="left")
@@ -428,7 +428,7 @@ def _fill_defaults(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ---------------------------- Public API ----------------------------
+                                                                      
 @dataclass
 class CtxOptions:
     max_lookback: int = 10
@@ -444,12 +444,12 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
                            max_lookback, same_track_bonus, require_same_track_if_short.
       - featurize(raw_dir, races_df, year, rnd, roster=None, options=None)
     """
-    # Variant 1: featurize(ctx)
+                               
     if len(args) == 1 and not kwargs and not isinstance(args[0], (str, Path)):
         ctx = args[0]
         get = (ctx.get if isinstance(ctx, dict) else lambda k, d=None: getattr(ctx, k, d))
         raw_dir = Path(get("raw_dir", get("raw", ".")))
-        # calendar
+                  
         races_df = get("races_df", None)
         races_csv = get("races_csv", None)
         if races_df is None and races_csv is not None:
@@ -460,10 +460,10 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
         if races_df is None:
             races_df = _calendar_df_from_files(raw_dir)
 
-        # ids
+             
         year = get("year", get("season", None))
         rnd = get("rnd", get("round", None))
-        # fallback: extract from build label like "2024_2"
+                                                          
         if year is None or rnd is None:
             label = get("build_id", get("build", get("label", get("name", None))))
             if label:
@@ -474,7 +474,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
         if year is None or rnd is None:
             raise TypeError("telemetry_history_pre.featurize(ctx): укажите 'year'/'season' и 'rnd'/'round' (или build_id вида 'YYYY_R').")
 
-        # roster (list/df/series)
+                                 
         roster = None
         roster_src = get("roster", get("drivers", None))
         if roster_src is not None:
@@ -494,7 +494,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
 
         return _featurize_impl(raw_dir, races_df, int(year), int(rnd), roster=roster, options=opt)
 
-    # Variant 2: legacy signature
+                                 
     if len(args) >= 4 and isinstance(args[0], (str, Path)):
         raw_dir, races_df, year, rnd = args[:4]
         roster = args[4] if len(args) >= 5 else kwargs.get("roster")
@@ -505,7 +505,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
     raise TypeError("telemetry_history_pre.featurize: ожидается featurize(ctx) или featurize(raw_dir, races_df, year, rnd, ...).")
 
 
-# ---------------------------- CLI (optional) ----------------------------
+                                                                          
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser("Build leak-safe telemetry priors")

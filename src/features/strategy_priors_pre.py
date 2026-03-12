@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover
 
 __all__ = ["featurize"]
 
-# ----------------------------- helpers -----------------------------
+                                                                     
 
 def _asof_mask(races: pd.DataFrame, year: int, rnd: int) -> pd.Series:
     y = pd.to_numeric(races.get('year'), errors='coerce')
@@ -150,7 +150,7 @@ def _load_stints(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             break
     return df
 
-# ----------------------------- core calcs -----------------------------
+                                                                        
 
 def _first_stop_by_driver(pit: pd.DataFrame, min_first_lap: int) -> pd.DataFrame:
     if pit is None or pit.empty or 'Driver' not in pit.columns:
@@ -267,22 +267,22 @@ def _window_width_from_gains(gain: pd.DataFrame, thresh_ms: float) -> float:
             cur = 0
     return float(best) if best > 0 else np.nan
 
-# ----------------------------- roster helpers -----------------------------
+                                                                            
 
 def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
-    # results / entrylist
+                         
     for src in (f'results_{year}_{rnd}.csv', f'results_{year}_{rnd}_R.csv', f'entrylist_{year}_{rnd}_R.csv', f'entrylist_{year}_{rnd}_Q.csv'):
         df = read_csv_if_exists(raw_dir / src)
         if not df.empty:
             for c in ('Abbreviation','Driver','code','driverRef'):
                 if c in df.columns and df[c].notna().any():
                     return df[c].astype(str).dropna().drop_duplicates().tolist()
-    # track_onehot/telemetry outputs
+                                    
     for aux in ('track_onehot.csv', 'telemetry_summary.csv'):
         df = read_csv_if_exists(raw_dir / aux)
         if not df.empty and 'Driver' in df.columns:
             return df['Driver'].astype(str).dropna().drop_duplicates().tolist()
-    # laps fallback
+                   
     laps = read_csv_if_exists(raw_dir / f'laps_{year}_{rnd}.csv')
     if not laps.empty:
         for c in ('Abbreviation','Driver'):
@@ -300,7 +300,7 @@ def _double_stack_risks(raw_dir: Path, y: int, r: int, stack_window: int, min_fi
     if d2t.empty or 'Driver' not in pit.columns:
         return pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
 
-    # первый пит каждого пилота (после разумного минимума)
+                                                          
     first = pit.dropna(subset=['Driver','lap']).copy()
     first['lap'] = pd.to_numeric(first['lap'], errors='coerce').astype('Int64')
     first = first.dropna(subset=['lap'])
@@ -311,8 +311,8 @@ def _double_stack_risks(raw_dir: Path, y: int, r: int, stack_window: int, min_fi
     if df.empty:
         return pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
 
-    # по командам: вероятность, что два пилота остановились в один круг (same_lap)
-    # и в пределах ±stack_window кругов (stacked)
+                                                                                  
+                                                 
     rows = []
     for tm, g in df.groupby('Team'):
         laps = sorted(pd.to_numeric(g['first_stop_lap'], errors='coerce').dropna().astype(int).tolist())
@@ -326,14 +326,14 @@ def _double_stack_risks(raw_dir: Path, y: int, r: int, stack_window: int, min_fi
     return pd.DataFrame(rows)
 
 
-# ----------------------------- main -----------------------------
+                                                                  
 
 def featurize(ctx: dict) -> pd.DataFrame:
     raw_dir = Path(ctx.get('raw_dir', 'data/raw_csv'))
     year = int(ctx['year']); rnd = int(ctx['round'])
 
     races = read_csv_if_exists(raw_dir / 'races.csv')
-    # Even if races.csv is missing/empty — produce defaults for current drivers
+                                                                               
     drivers_now = _current_drivers(raw_dir, year, rnd)
 
     W: Dict[str, float] = {
@@ -350,7 +350,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
 
     prev: List[Tuple[int,int]] = _list_prev_races(races, year, rnd, int(W['prevN'])) if not races.empty else []
 
-    # --- Baselines (use soft defaults if history is missing) ---
+                                                                 
     cluster_stops_median = _cluster_median_stops(raw_dir, prev) if prev else np.nan
     cluster_first_med    = _cluster_first_stint_len(raw_dir, prev) if prev else np.nan
 
@@ -359,7 +359,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     if not np.isfinite(cluster_first_med):
         cluster_first_med = 15.0
 
-    # Undercut window width (median across prev races)
+                                                      
     win_vals: List[float] = []
     if prev:
         for (y, r) in prev:
@@ -369,7 +369,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
                 win_vals.append(float(w))
     undercut_window_width = float(np.median(win_vals)) if win_vals else np.nan
 
-    # Track/weather scalars
+                           
     try:
         tr = feat_track(ctx)
     except Exception:
@@ -392,7 +392,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     expected_stop_count = float(np.clip(expected_stop_count, 1.0, 4.0))
     first_stint_len_exp = float(np.clip(first_stint_len_exp, 5.0, 30.0))
 
-    # Team risks (double‑stack) — may be unavailable if нет pit_stops
+                                                                     
     team_risks = pd.DataFrame(columns=['Team','double_stack_risk','double_stack_same_lap'])
     if prev:
         all_risks: List[pd.DataFrame] = []
@@ -407,18 +407,18 @@ def featurize(ctx: dict) -> pd.DataFrame:
                 double_stack_same_lap=('double_stack_same_lap','mean'),
             )
 
-    # Current team mapping (optional)
+                                     
     d2t_now = _driver_team_map(raw_dir, year, rnd)
 
-    # --- Build output even if mapping is absent ---
+                                                    
     if not d2t_now.empty:
         out = d2t_now.merge(team_risks, on='Team', how='left')
         drivers = out['Driver'].astype(str).dropna().drop_duplicates().tolist()
     else:
-        # fallback roster only
+                              
         drivers = drivers_now
         out = pd.DataFrame({'Driver': drivers})
-        # join team risks невозможно — оставим NaN
+                                                  
         out['double_stack_risk'] = np.nan
         out['double_stack_same_lap'] = np.nan
 
@@ -431,7 +431,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = np.nan
 
-    # ensure only current roster rows
+                                     
     if drivers_now:
         out = pd.DataFrame({'Driver': drivers_now}).merge(out[keep], on='Driver', how='left')
 

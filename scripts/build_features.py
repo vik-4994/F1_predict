@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 
 import pandas as pd
 
-# import registry and orchestrator
+                                  
 from src.features import FEATURIZERS, TARGETIZERS
 
 import warnings
@@ -40,9 +40,9 @@ warnings.filterwarnings(
 )
 
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+                                                              
+         
+                                                              
 
 def log(msg: str, *, quiet: bool = False) -> None:
     if not quiet:
@@ -96,7 +96,7 @@ def discover_races(raw_dir: Path, races_filter: Optional[List[str]] = None) -> L
 
 def safe_to_parquet_or_csv(df: pd.DataFrame, path: Path, *, also_csv: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Parquet
+             
     df.to_parquet(path, index=False)
     if also_csv:
         df.to_csv(path.with_suffix(".csv"), index=False)
@@ -137,14 +137,14 @@ def run_modules(
                 raise RuntimeError(msg)
             log(msg, quiet=not verbose)
             continue
-        # Ensure 'Driver' present
+                                 
         if "Driver" not in part.columns:
             msg = f"  - {name}: missing 'Driver' column"
             if strict_empty:
                 raise RuntimeError(msg)
             log(msg, quiet=not verbose)
             continue
-        # Dump
+              
         if dump_dir is not None:
             dump_dir.mkdir(parents=True, exist_ok=True)
             safe_to_parquet_or_csv(part, dump_dir / f"{name}.parquet", also_csv=True)
@@ -159,9 +159,9 @@ def run_modules(
     return out
 
 
-# ------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------
+                                                              
+     
+                                                              
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build pre-race features and optional targets")
@@ -193,7 +193,7 @@ def main() -> None:
         log("No races found.")
         return
 
-    # module selection
+                      
     selected_modules = None
     if args.modules:
         selected_modules = [m.strip() for m in args.modules.split(",") if m.strip()]
@@ -213,10 +213,10 @@ def main() -> None:
             continue
 
         log(f"\n=== Build {tag} ===")
-        # dump directory per race if requested
+                                              
         dump_dir = (out_dir / "tmp" / tag) if args.dump_intermediate else None
 
-        # base ctx
+                  
         ctx: Dict = {"raw_dir": raw, "year": year, "round": rnd}
         if args.verbose:
             ctx["verbose"] = True
@@ -226,7 +226,7 @@ def main() -> None:
             except Exception as e:
                 log(f"  ! bad --ctx-json: {e}")
 
-        # run feature modules
+                             
         feat_df = run_modules(
             ctx,
             FEATURIZERS,
@@ -241,7 +241,7 @@ def main() -> None:
             log("  ! no features produced (empty result)")
             continue
 
-        # optional targets
+                          
         if args.with_targets:
             tgt_df = run_modules(
                 ctx,
@@ -254,16 +254,16 @@ def main() -> None:
                 progress=(args.progress and not args.verbose),
             )
             if tgt_df is not None and not tgt_df.empty:
-                # merge into features and also save standalone targets
+                                                                      
                 feat_df = feat_df.merge(tgt_df, on="Driver", how="left")
                 safe_to_parquet_or_csv(tgt_df, out_dir / f"targets_{tag}.parquet", also_csv=args.also_csv)
                 all_tgt.append(tgt_df.assign(year=year, round=rnd))
 
-        # Save per race
+                       
         safe_to_parquet_or_csv(feat_df, feat_path, also_csv=args.also_csv)
         all_feat.append(feat_df.assign(year=year, round=rnd))
 
-    # Save concatenated
+                       
     if all_feat:
         full_feat = pd.concat(all_feat, ignore_index=True, sort=False)
         safe_to_parquet_or_csv(full_feat, out_dir / "all_features.parquet", also_csv=args.also_csv)

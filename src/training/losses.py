@@ -1,4 +1,4 @@
-# FILE: src/training/losses.py
+                              
 from __future__ import annotations
 
 from typing import Optional
@@ -7,7 +7,7 @@ import torch.nn as nn
 
 
 def _ensure_1d(x: torch.Tensor) -> torch.Tensor:
-    # reshape, а не view: работает корректно и для не-contiguous
+                                                                
     if x.dim() != 1:
         x = x.reshape(-1)
     return x
@@ -19,10 +19,10 @@ def _suffix_logsumexp(s: torch.Tensor) -> torch.Tensor:
     Для каждого k вернуть logsumexp(s[k:]).
     Реализация без in-place через logcumsumexp по перевёрнутому вектору.
     """
-    # вычитаем максимум для численной устойчивости
+                                                  
     m = torch.max(s)
     st = s - m
-    # лог-сумма от хвоста: flip -> logcumsumexp -> flip назад
+                                                             
     rev = torch.logcumsumexp(st.flip(0), dim=0).flip(0)
     return rev + m
 
@@ -37,9 +37,9 @@ def plackett_luce_nll(scores: torch.Tensor, order: torch.Tensor) -> torch.Tensor
     scores = _ensure_1d(scores).contiguous()
     order = _ensure_1d(order).to(dtype=torch.long).contiguous()
 
-    # переставляем скоры в наблюдённый порядок (winner-first)
-    s = scores.gather(0, order)             # (N,)
-    denom = _suffix_logsumexp(s)            # (N,)
+                                                             
+    s = scores.gather(0, order)                   
+    denom = _suffix_logsumexp(s)                  
     nll = denom - s
     return nll.sum()
 
@@ -52,8 +52,8 @@ def plackett_luce_topk_nll(scores: torch.Tensor, order: torch.Tensor, topk: int)
     scores = _ensure_1d(scores).contiguous()
     order = _ensure_1d(order).to(dtype=torch.long).contiguous()
 
-    s = scores.gather(0, order)             # (N,)
-    denom = _suffix_logsumexp(s)            # (N,)
+    s = scores.gather(0, order)                   
+    denom = _suffix_logsumexp(s)                  
     k = min(int(topk), s.size(0))
     nll = denom[:k] - s[:k]
     return nll.sum()

@@ -1,4 +1,4 @@
-# FILE: src/training/models/__init__.py
+                                       
 """
 Models package: expose common ranker constructors.
 """

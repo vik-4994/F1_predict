@@ -12,7 +12,7 @@ Feature modules registry (PRE-RACE ONLY).
 from __future__ import annotations
 import pandas as pd
 
-# -------- PRE-RACE FEATURE MODULES (no leakage) --------
+                                                         
 from .track_onehot import featurize as track_onehot
 from .weather_basic import featurize as weather_basic
 from .history_form import featurize as history_form
@@ -29,11 +29,11 @@ from .pit_ops_pre import featurize as pit_ops_pre
 from .track_profile.track_profile import featurize as track_profile
 from .driver_track_cluster_pre import featurize as driver_track_cluster_pre
 
-# -------- TARGETS / LABELS (kept separate) --------
+                                                    
 from .results_target import featurize as results_target
 
-# Рекомендуемый порядок: контекст трассы → погода → форма/прайоры →
-# телеметрия‑история → quali/стратегия/шины/тренды/надёжность/пит‑риски → трафик → прайоры → пит‑операции
+                                                                   
+                                                                                                         
 FEATURIZERS = [
     ("track_onehot", track_onehot),
     ("track_profile", track_profile),
@@ -52,7 +52,7 @@ FEATURIZERS = [
     ("pit_ops_pre", pit_ops_pre),
 ]
 
-# Отдельно держим таргеты/лейблы, чтобы собирать их по флагу
+                                                            
 TARGETIZERS = [
     ("results_target", results_target),
 ]
@@ -87,11 +87,11 @@ def featurize_pre(ctx: dict, modules: list[str] | None = None, how: str = "outer
         out = out.merge(df, on="Driver", how=how)
     return out
 
-# Для совместимости можно вызывать просто features.featurize(ctx)
+                                                                 
 featurize = featurize_pre
 
 __all__ = [
-    # функции‑экспорты модулей
+                              
     "track_onehot",
     "weather_basic",
     "history_form",
@@ -105,9 +105,9 @@ __all__ = [
     "traffic_overtake_pre",
     "driver_team_priors_pre",
     "pit_ops_pre",
-    # таргеты/лейблы
+                    
     "results_target",
-    # реестры и сборщики
+                        
     "FEATURIZERS",
     "TARGETIZERS",
     "featurize_pre",

@@ -22,39 +22,39 @@ import numpy as np
 import pandas as pd
 import re
 
-# Public API
+            
 __all__ = [
-    # I/O & conversions
+                       
     "to_td",
     "read_csv_if_exists",
     "read_csv_header",
-    # path helpers
+                  
     "laps_path", "weather_path", "results_path", "telemetry_paths",
     "race_control_path", "track_status_path", "parse_year_round",
-    # laps enrichment
+                     
     "load_laps_enriched",
     "compute_stints",
     "best10_and_clean",
     "compound_counts",
-    # field helpers
+                   
     "ensure_driver_index",
-    # bounds + telemetry alignment
+                                  
     "build_lap_bounds",
     "attach_lapnumber_to_telem",
     "attach_for_all_drivers",
-    # telemetry aggregation
+                           
     "telem_per_lap_agg",
     "telem_per_race_agg",
-    # race control / track status helpers
+                                         
     "load_race_control", "load_track_status",
     "build_status_windows", "lap_shares_from_windows",
     "get_outlaps", "tag_events_in_windows",
     "positions_by_lap",
 ]
 
-# =========================
-# I/O & Conversions
-# =========================
+                           
+                   
+                           
 
 def to_td(x) -> pd.Timedelta:
     """Parse object to pandas Timedelta (NaT on errors)."""
@@ -72,9 +72,9 @@ def read_csv_header(p: Path) -> List[str]:
         return []
     return list(pd.read_csv(p, nrows=0).columns)
 
-# =========================
-# Path helpers
-# =========================
+                           
+              
+                           
 
 def laps_path(raw_dir: Path, year: int, rnd: int) -> Path:
     return Path(raw_dir) / f"laps_{year}_{rnd}.csv"
@@ -115,9 +115,9 @@ def parse_year_round(name: str) -> Tuple[int, int]:
         raise ValueError(f"Cannot parse year/round from: {name}")
     return int(m.group(1)), int(m.group(2))
 
-# =========================
-# Laps enrichment
-# =========================
+                           
+                 
+                           
 
 def load_laps_enriched(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     """Load laps_YYYY_R.csv and enrich with:
@@ -133,7 +133,7 @@ def load_laps_enriched(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
 
     df = pd.read_csv(p)
 
-    # normalize driver key
+                          
     if "Driver" in df.columns:
         df["Driver"] = df["Driver"].astype(str)
     elif "Abbreviation" in df.columns:
@@ -141,7 +141,7 @@ def load_laps_enriched(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     elif "DriverNumber" in df.columns:
         df["Driver"] = df["DriverNumber"].astype(str)
 
-    # Timedeltas
+                
     td_cols = [
         "LapTime", "Sector1Time", "Sector2Time", "Sector3Time",
         "PitInTime", "PitOutTime", "LapStartTime", "SessionTime", "Time",
@@ -150,7 +150,7 @@ def load_laps_enriched(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
         if c in df.columns:
             df[c] = to_td(df[c])
 
-    # Seconds versions
+                      
     for src, dst in [
         ("LapTime", "LapTime_s"),
         ("Sector1Time", "S1_s"),
@@ -160,18 +160,18 @@ def load_laps_enriched(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
         if src in df.columns:
             df[dst] = df[src].dt.total_seconds()
 
-    # Pit flags
+               
     df["is_pit"] = False
     if "PitInTime" in df.columns:
         df["is_pit"] |= df["PitInTime"].notna()
     if "PitOutTime" in df.columns:
         df["is_pit"] |= df["PitOutTime"].notna()
 
-    # Order for stint detection
+                               
     if {"Driver", "LapNumber"}.issubset(df.columns):
         df = df.sort_values(["Driver", "LapNumber"], kind="mergesort").reset_index(drop=True)
 
-    # Stints by compound
+                        
     df = compute_stints(df)
     return df
 
@@ -236,9 +236,9 @@ def compound_counts(laps: pd.DataFrame) -> pd.DataFrame:
     comp.columns = [f"tyre_{c}_laps" for c in comp.columns]
     return comp.reset_index()
 
-# =========================
-# Field helpers
-# =========================
+                           
+               
+                           
 
 def ensure_driver_index(drivers: pd.Series | Iterable[str], values: Dict[str, float]) -> pd.DataFrame:
     """Broadcast feature dict to a DF with one row per Driver."""
@@ -247,9 +247,9 @@ def ensure_driver_index(drivers: pd.Series | Iterable[str], values: Dict[str, fl
     rows = [{"Driver": d, **values} for d in drivers]
     return pd.DataFrame(rows)
 
-# =========================
-# Bounds & telemetry alignment
-# =========================
+                           
+                              
+                           
 
 def build_lap_bounds(laps: pd.DataFrame) -> pd.DataFrame:
     """Create per‑lap time bounds [start, end) for telemetry alignment.
@@ -296,7 +296,7 @@ def attach_lapnumber_to_telem(
 
     b = b.sort_values("start").reset_index(drop=True)
 
-    # choose merge key
+                      
     right_cols = ["start", "end", "LapNumber"]
     by = None
     if driver is None and "Driver" in out.columns and "Driver" in b.columns:
@@ -312,7 +312,7 @@ def attach_lapnumber_to_telem(
         allow_exact_matches=True,
         by=by,
     )
-    # keep only points within the lap window
+                                            
     aligned = aligned[aligned[time_col] <= aligned["end"]]
     return aligned.drop(columns=["start", "end"]).reset_index(drop=True)
 
@@ -326,9 +326,9 @@ def attach_for_all_drivers(telem: pd.DataFrame, bounds: pd.DataFrame, time_col="
         parts.append(attach_lapnumber_to_telem(sub, bounds, driver=str(d), time_col=time_col))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
-# =========================
-# Telemetry aggregation
-# =========================
+                           
+                       
+                           
 
 def telem_per_lap_agg(
     telem_labeled: pd.DataFrame,
@@ -350,21 +350,21 @@ def telem_per_lap_agg(
         return pd.DataFrame()
 
     df = telem_labeled.copy()
-    # Ensure time is timedelta for rate metrics
+                                               
     if time_col in df.columns:
         df[time_col] = to_td(df[time_col])
 
     cols = [c for c in ["Speed", "Throttle", "Brake", "nGear", "RPM", "DRS"] if c in df.columns]
     g = df.groupby(lap_col, dropna=True)
 
-    # Basic stats
+                 
     agg = pd.DataFrame(index=g.size().index)
     for c in cols:
         agg[f"{c}_mean"] = g[c].mean()
         agg[f"{c}_max"] = g[c].max()
         agg[f"{c}_std"] = g[c].std()
 
-    # Shares
+            
     if "Throttle" in df.columns:
         agg["Throttle_p90_share"] = g["Throttle"].apply(lambda s: float((s >= 90).mean()))
     if "Brake" in df.columns:
@@ -372,11 +372,11 @@ def telem_per_lap_agg(
     if "DRS" in df.columns:
         agg["DRS_share"] = g["DRS"].apply(lambda s: float((s > 0).mean()))
 
-    # RPM p95
+             
     if "RPM" in df.columns:
         agg["RPM_p95"] = g["RPM"].quantile(0.95)
 
-    # Accel/decel (approx) and shift rate
+                                         
     if "Speed" in df.columns and time_col in df.columns:
         def _accels(sub: pd.DataFrame) -> Tuple[float, float]:
             s = sub.sort_values(time_col)
@@ -410,7 +410,7 @@ def telem_per_lap_agg(
 
         agg["shift_rate_hz"] = g.apply(_shift_rate)
 
-    agg = agg.reset_index()  # brings back LapNumber
+    agg = agg.reset_index()                         
     return agg
 
 
@@ -423,21 +423,21 @@ def telem_per_race_agg(
     per_lap = telem_per_lap_agg(telem_labeled, lap_col=lap_col, time_col=time_col)
     if per_lap.empty:
         return pd.DataFrame()
-    # take mean of numeric columns across laps
+                                              
     num = per_lap.select_dtypes(include=[np.number])
     if num.empty:
         return pd.DataFrame()
     row = num.mean(numeric_only=True).to_frame().T
     return row
 
-# ---------- loaders ----------
+                               
 
 def load_race_control(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     p = race_control_path(raw_dir, year, rnd)
     if not p.exists():
         return pd.DataFrame()
     df = pd.read_csv(p)
-    # normalize basic fields
+                            
     for col in ["Utc"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
@@ -455,7 +455,7 @@ def load_track_status(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     if not p.exists():
         return pd.DataFrame()
     df = pd.read_csv(p)
-    # expected columns: Time (session Timedelta), Status (str code), Message (str)
+                                                                                  
     if "Time" in df.columns:
         df["Time"] = to_td(df["Time"])
     if "Status" in df.columns:
@@ -466,9 +466,9 @@ def load_track_status(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
         df = df.sort_values("Time").reset_index(drop=True)
     return df
 
-# ---------- status windows ----------
-# FastF1 Track Status codes:
-# 1: Clear, 2: Yellow, 4: SC, 5: Red, 6: VSC deployed, 7: VSC ending
+                                      
+                            
+                                                                    
 
 
 def _mk_windows_from_status(
@@ -489,7 +489,7 @@ def _mk_windows_from_status(
         elif open_t0 is not None and s in end_when_codes:
             wins.append((open_t0, t))
             open_t0 = None
-    if open_t0 is not None:  # close at last known time
+    if open_t0 is not None:                            
         t_end = ts["Time"].dropna().max()
         if pd.notna(t_end) and t_end > open_t0:
             wins.append((open_t0, t_end))
@@ -502,7 +502,7 @@ def build_status_windows(ts: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["kind", "t0", "t1"])
 
     sc = _mk_windows_from_status(ts, "4", end_when_codes=["1", "2", "5", "6", "7"])
-    vsc = _mk_windows_from_status(ts, "6", end_when_codes=["1"])  # '7' is transitional
+    vsc = _mk_windows_from_status(ts, "6", end_when_codes=["1"])                       
     yel = _mk_windows_from_status(ts, "2", end_when_codes=["1", "4", "5", "6", "7"])
 
     rows = []
@@ -514,7 +514,7 @@ def build_status_windows(ts: pd.DataFrame) -> pd.DataFrame:
         out = out.sort_values(["t0", "t1"]).reset_index(drop=True)
     return out
 
-# ---------- overlap onto laps ----------
+                                         
 
 def _overlap_seconds(
     a0: pd.Timedelta, a1: pd.Timedelta,
@@ -565,7 +565,7 @@ def lap_shares_from_windows(lap_bounds: pd.DataFrame, wins: pd.DataFrame) -> pd.
                          "sc_share": sc, "vsc_share": vsc, "yellow_share": yel})
     return pd.DataFrame(out_rows)
 
-# ---------- pit stops in windows ----------
+                                            
 
 def get_outlaps(laps: pd.DataFrame) -> pd.DataFrame:
     """Return only outlaps (Lap with non‑null PitOutTime).
@@ -599,7 +599,7 @@ def tag_events_in_windows(
         tags.append(tag)
     return pd.Series(tags, index=times.index)
 
-# ---------- positions per lap ----------
+                                         
 
 def positions_by_lap(laps: pd.DataFrame) -> pd.DataFrame:
     """Per‑lap positions (end‑of‑lap) from session.laps.

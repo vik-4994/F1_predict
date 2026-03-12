@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 import re
 
-# ---------------------- I/O helpers ----------------------
+                                                           
 
 def _read_csv(p: Path) -> pd.DataFrame:
     try:
@@ -60,12 +60,12 @@ def _pick_first_existing(paths: Sequence[Path]) -> Path | None:
             return p
     return None
 
-# -------------------- Roster detection -------------------
+                                                           
 
 _ROSTER_FILES = (
     "entrylist_{y}_{r}_Q.csv",
     "entrylist_{y}_{r}.csv",
-    "results_{y}_{r}_Q.csv",  # safe for roster only
+    "results_{y}_{r}_Q.csv",                        
 )
 
 _DRIVER_COLS = ("Driver", "Abbreviation", "driverRef", "DriverRef", "DriverCode", "BroadcastName")
@@ -93,7 +93,7 @@ def _load_roster(raw_dir: Path, year: int, rnd: int, drivers: Optional[Sequence[
                         return vals
     return []
 
-# ---------------- Session window (optional) ---------------
+                                                            
 
 _META_FILES = (
     "meta_{y}_{r}.csv",
@@ -111,16 +111,16 @@ def _session_window(raw_dir: Path, year: int, rnd: int, session: str) -> Tuple[p
         df = _read_csv(raw_dir / pat.format(y=year, r=rnd))
         if df.empty:
             continue
-        # identify session rows (R/Qualifying/Q/Sprint/FP*). If no marker, use whole file.
+                                                                                          
         if any(c in df.columns for c in ("Session", "Phase")):
             key = "Session" if "Session" in df.columns else "Phase"
-            mask = df[key].astype(str).str.upper().str.startswith(sess[0])  # R/Q/S
+            mask = df[key].astype(str).str.upper().str.startswith(sess[0])         
             sub = df[mask].copy()
             if sub.empty:
                 sub = df.copy()
         else:
             sub = df.copy()
-        # try common datetime columns
+                                     
         for sc, ec in (
             ("StartUtc", "EndUtc"), ("StartUTC", "EndUTC"),
             ("Start", "End"), ("DateStart", "DateEnd"),
@@ -132,7 +132,7 @@ def _session_window(raw_dir: Path, year: int, rnd: int, session: str) -> Tuple[p
                     return s.min(), e.max()
     return None, None
 
-# -------------------- Weather parsing --------------------
+                                                           
 
 _TEMP_COLS = ("AirTemp", "AirTemp_C", "Temperature", "AirTemperature", "temp", "TempC")
 _TRACK_TEMP_COLS = ("TrackTemp", "TrackTemp_C", "TrackTemperature")
@@ -157,7 +157,7 @@ def _select_cols(df: pd.DataFrame, cands: Sequence[str]) -> Optional[str]:
     for c in cands:
         if c in df.columns:
             return c
-    # case‑insensitive match
+                            
     lower = {c.lower(): c for c in df.columns}
     for c in cands:
         if c.lower() in lower:
@@ -170,7 +170,7 @@ def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestam
     d = _coerce_time(df)
     if "_ts" in d.columns and (t0 is not None and t1 is not None):
         d = d[(d["_ts"] >= t0) & (d["_ts"] <= t1)].copy()
-        if d.empty:  # if filter erased everything, fall back to full
+        if d.empty:                                                  
             d = _coerce_time(df)
 
     out: Dict[str, float] = {}
@@ -185,7 +185,7 @@ def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestam
 
     num(_TEMP_COLS, "weather_pre_air_temp_mean", lambda s: s.mean())
     num(_TEMP_COLS, "weather_pre_air_temp_std", lambda s: s.std(ddof=0))
-    # track temp optional
+                         
     c_track = _select_cols(d, _TRACK_TEMP_COLS)
     if c_track:
         v = pd.to_numeric(d[c_track], errors="coerce")
@@ -196,7 +196,7 @@ def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestam
     num(_HUM_COLS, "weather_pre_humidity_mean", lambda s: s.mean())
     num(_WIND_COLS, "weather_pre_wind_kph_mean", lambda s: s.mean())
 
-    # rain prob p75 if present
+                              
     c_rp = _select_cols(d, _RAIN_P_COLS)
     if c_rp:
         v = pd.to_numeric(d[c_rp], errors="coerce")
@@ -207,12 +207,12 @@ def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestam
     out["weather_pre_records_n"] = int(len(d))
     return out
 
-# ------------------------ Public API ----------------------
+                                                            
 
 @dataclass
 class WeatherOptions:
-    mode: str = "forecast"           # "forecast" | "actual" | "auto"
-    allow_fallback_actual: bool = False  # only used if mode=="auto"
+    mode: str = "forecast"                                           
+    allow_fallback_actual: bool = False                             
 
 
 def featurize(ctx: Dict) -> pd.DataFrame:
@@ -229,8 +229,8 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     drivers: Optional[List[str]]
     """
     raw_dir = Path(ctx.get("raw_dir", "."))
-    year = int(ctx["year"])  # required
-    rnd = int(ctx["round"])  # required
+    year = int(ctx["year"])            
+    rnd = int(ctx["round"])            
     session = str(ctx.get("session", "R"))
 
     opt = WeatherOptions(
@@ -238,7 +238,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         allow_fallback_actual=bool(ctx.get("allow_fallback_actual", False)),
     )
 
-    # --- choose weather file(s) ---
+                                    
     forecast_p = raw_dir / f"weather_forecast_{year}_{rnd}.csv"
     actual_p   = raw_dir / f"weather_{year}_{rnd}.csv"
 
@@ -247,7 +247,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         weather_path = forecast_p if forecast_p.exists() else None
     elif opt.mode == "actual":
         weather_path = actual_p if actual_p.exists() else None
-    else:  # auto
+    else:        
         if forecast_p.exists():
             weather_path = forecast_p
         elif opt.allow_fallback_actual and actual_p.exists():
@@ -255,11 +255,11 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         else:
             weather_path = None
 
-    # --- roster ---
+                    
     drivers = _load_roster(raw_dir, year, rnd, ctx.get("drivers"))
     base = pd.DataFrame({"Driver": drivers}) if drivers else pd.DataFrame()
 
-    # If no weather data, return neutral rows (NaNs) for roster (or empty DF if no roster)
+                                                                                          
     if not weather_path:
         if base.empty:
             return base
@@ -276,22 +276,22 @@ def featurize(ctx: Dict) -> pd.DataFrame:
             base[k] = v
         return base
 
-    # --- aggregate weather within session window if possible ---
+                                                                 
     dfw = _read_csv(weather_path)
     t0, t1 = _session_window(raw_dir, year, rnd, session=session)
     agg = _aggregate_window(dfw, t0, t1)
 
     if base.empty:
-        # No roster → return single row (session‑level), still leak‑safe
+                                                                        
         return pd.DataFrame([agg])
 
-    # broadcast to drivers
+                          
     for k, v in agg.items():
         base[k] = v
     return base
 
 
-# ----------------------- CLI wrapper ----------------------
+                                                            
 if __name__ == "__main__":
     import argparse
 

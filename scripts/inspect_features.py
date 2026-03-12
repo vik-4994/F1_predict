@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-# ----- utils -----
+                   
 
 def read_feature_cols(artifacts: Path) -> List[str]:
     p = artifacts / "feature_cols.txt"
@@ -21,7 +21,7 @@ def read_scaler(artifacts: Path) -> Dict[str, List[float]]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 def load_model(artifacts: Path, device: str = "cpu") -> torch.nn.Module:
-    # универсальный загрузчик из src.training.inference
+                                                       
     sys.path.insert(0, str(Path.cwd()))
     from src.training.inference import load_artifacts
     model, scaler, feature_cols, meta, device_used = load_artifacts(artifacts, device=device)
@@ -34,7 +34,7 @@ def _read_table(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 def _build_X(df: pd.DataFrame, feature_cols: List[str], scaler: Dict[str, List[float]]) -> Tuple[np.ndarray, List[str]]:
-    # гарантируем наличие всех столбцов по порядку обучающего сета
+                                                                  
     out = []
     for c in feature_cols:
         if c in df.columns:
@@ -43,12 +43,12 @@ def _build_X(df: pd.DataFrame, feature_cols: List[str], scaler: Dict[str, List[f
             out.append(np.full(len(df), np.nan, dtype=float))
     X = np.vstack(out).T.astype(float)
 
-    # Импьютация медиан (из train-скейлера), нормализация и клиппинг как в проде
+                                                                                
     mu = np.asarray(scaler["mu"], dtype=float)
     sigma = np.asarray(scaler["sigma"], dtype=float)
     med = np.asarray(scaler["med"], dtype=float)
 
-    # nan -> med
+                
     nan_mask = ~np.isfinite(X)
     if nan_mask.any():
         X[nan_mask] = np.take(med, np.where(nan_mask)[1])
@@ -58,7 +58,7 @@ def _build_X(df: pd.DataFrame, feature_cols: List[str], scaler: Dict[str, List[f
     return Z, feature_cols
 
 def _groups_for(col: str) -> str:
-    # группируем по источнику фичи/модулю
+                                         
     if col.startswith("track_is_"): return "track_onehot"
     if col.startswith("weather_"): return "weather_basic"
     if col.startswith("history_"): return "history_form"
@@ -80,14 +80,14 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     s = ex.sum()
     return ex / s if s > 0 else np.full_like(ex, 1.0 / len(ex))
 
-# ----- main logic -----
+                        
 
 def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: int, device: str = "cpu"):
     df = _read_table(dump_path)
     if df.empty:
         print("Empty dump file", file=sys.stderr); sys.exit(2)
 
-    # фильтруем выбранных пилотов (если указан список)
+                                                      
     if drivers_filter:
         df = df[df["Driver"].astype(str).isin(drivers_filter)].copy()
         if df.empty:
@@ -96,18 +96,18 @@ def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: i
     feature_cols = read_feature_cols(artifacts)
     scaler = read_scaler(artifacts)
 
-    # Матрица нормализованных фич Z, порядок как в train
+                                                        
     Z, cols = _build_X(df, feature_cols, scaler)
 
-    # torch-предикт и атрибуции grad*input
+                                          
     model = load_model(artifacts, device=device)
     tZ = torch.tensor(Z, dtype=torch.float32, requires_grad=True)
-    scores = model(tZ).squeeze(-1)  # (N,)
-    # убеждаемся в порядке:
+    scores = model(tZ).squeeze(-1)        
+                           
     order = torch.argsort(scores, descending=True).detach().cpu().numpy()
     probs = _softmax(scores.detach().cpu().numpy())
 
-    # печать таблицы рангов
+                           
     print("\n=== RANKS ===")
     tab = (pd.DataFrame({
         "Driver": df["Driver"].values,
@@ -116,10 +116,10 @@ def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: i
     }).sort_values("score", ascending=False).reset_index(drop=True))
     print(tab.to_string(index=False, float_format=lambda x: f"{x: .6f}"))
 
-    # атрибуции для выбранных пилотов
+                                     
     print("\n=== PER-DRIVER ATTRIBUTIONS (grad * input) ===")
     for i in range(len(df)):
-        # если указан фильтр и пилота нет в нём — пропускаем
+                                                            
         if drivers_filter and str(df.iloc[i]["Driver"]) not in drivers_filter:
             continue
 
@@ -127,9 +127,9 @@ def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: i
         if tZ.grad is not None:
             tZ.grad.zero_()
         scores[i].backward(retain_graph=True)
-        grad = tZ.grad[i].detach().cpu().numpy()  # (D,)
-        contrib = grad * Z[i]  # grad * input (у нас input уже нормализован)
-        # топ + / -
+        grad = tZ.grad[i].detach().cpu().numpy()        
+        contrib = grad * Z[i]                                               
+                   
         pos_idx = np.argsort(-contrib)[:topk]
         neg_idx = np.argsort(contrib)[:topk]
 
@@ -142,7 +142,7 @@ def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: i
         for j in neg_idx:
             print(f"  {cols[j]:40s}  contrib={contrib[j]: .4f}   z={Z[i,j]: .3f}")
 
-        # групповые вклады
+                          
         group_sums: Dict[str, float] = {}
         for j, c in enumerate(cols):
             g = _groups_for(c)

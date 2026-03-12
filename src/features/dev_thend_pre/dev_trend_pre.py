@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover
 
 __all__ = ["featurize"]
 
-# ----------------------------- helpers -----------------------------
+                                                                     
 
 def _parse_fn_triplet(name: str) -> Optional[Tuple[int, int]]:
     m = re.search(r"_(\d{4})_(\d{1,2})\.csv$", name)
@@ -60,7 +60,7 @@ def _to_ms(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
     if s.notna().any():
         return s.astype(float)
-    # try parse time strings like mm:ss.mmm
+                                           
     try:
         return pd.to_timedelta(series, errors="coerce").dt.total_seconds() * 1000.0
     except Exception:
@@ -106,7 +106,7 @@ def _ensure_driver(df: pd.DataFrame) -> pd.DataFrame:
             return df.rename(columns={c: "Driver"})
     return df
 
-# ----------------------------- loaders -----------------------------
+                                                                     
 
 def _load_laps(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     df = read_csv_if_exists(raw_dir / f"laps_{y}_{r}.csv")
@@ -143,7 +143,7 @@ def _load_pits(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 
 
 def _driver_team_map(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
-    # prefer results for that race, fallback to entrylist
+                                                         
     res = read_csv_if_exists(raw_dir / f"results_{y}_{r}.csv")
     if res.empty:
         res = read_csv_if_exists(raw_dir / f"results_{y}_{r}_R.csv")
@@ -180,14 +180,14 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
                 return laps[c].astype(str).dropna().drop_duplicates().tolist()
     return []
 
-# ----------------------------- per‑race paces -----------------------------
+                                                                            
 
 def _per_race_pace_z(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     laps = _load_laps(raw_dir, y, r)
     if laps.empty:
         return pd.DataFrame(columns=["Driver","pace_z"])  
 
-    # mark in/out laps using pit table if available
+                                                   
     pits = _load_pits(raw_dir, y, r)
     if not pits.empty and {"Driver","lap"}.issubset(pits.columns):
         ex = pits[["Driver","lap"]].dropna().copy()
@@ -195,9 +195,9 @@ def _per_race_pace_z(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
         ex = ex.dropna(subset=["lap"]).astype({"lap": int})
         excl = pd.concat([ex.assign(excl=ex["lap"]), ex.assign(excl=ex["lap"]+1)])[ ["Driver","excl"] ]
         laps = laps.merge(excl, left_on=["Driver","lap"], right_on=["Driver","excl"], how="left")
-        laps = laps[laps["excl"].isna()].drop(columns=["excl"])  # clean laps
+        laps = laps[laps["excl"].isna()].drop(columns=["excl"])              
 
-    # per‑driver trimmed median
+                               
     grp = (laps.dropna(subset=["milliseconds"]) 
                .groupby("Driver", as_index=False)["milliseconds"]
                .agg(med_clean_ms=_trimmed_median_ms))
@@ -213,20 +213,20 @@ def _per_race_pace_z(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 
     return grp[["Driver","pace_z"]]
 
-# ----------------------------- main -----------------------------
+                                                                  
 
 def featurize(ctx: Dict) -> pd.DataFrame:
     raw_dir = Path(ctx.get("raw_dir", "data/raw_csv"))
     year = int(ctx.get("year")); rnd = int(ctx.get("round"))
 
-    # choose history races strictly before (year, round)
+                                                        
     races = read_csv_if_exists(raw_dir / "races.csv")
     prev: List[Tuple[int,int]] = []
     if not races.empty and {"year","round"}.issubset(races.columns):
         rs = races.loc[_asof_mask(races, year, rnd), ["year","round"]].dropna().astype(int)
         prev = list(map(tuple, rs.sort_values(["year","round"]).values.tolist()))
     else:
-        # infer from file names
+                               
         keys = []
         for p in raw_dir.glob("laps_*.csv"):
             pr = _parse_fn_triplet(p.name)
@@ -234,13 +234,13 @@ def featurize(ctx: Dict) -> pd.DataFrame:
                 keys.append(pr)
         prev = sorted(set(keys))
 
-    # keep recent window up to Kmax for stability & trend calcs
+                                                               
     K = int(ctx.get("dev_trend_window", 6))
     W = int(ctx.get("stability_window", 8))
     if prev:
-        prev = prev[-max(K, W, 3):]  # need at least few races if available
+        prev = prev[-max(K, W, 3):]                                        
 
-    # build pace_z per race and team means
+                                          
     per_race: List[pd.DataFrame] = []
     team_means: List[pd.DataFrame] = []
     for (y, r) in prev:
@@ -249,7 +249,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
             continue
         dpace["_ord"] = _order_key(y, r)
         dpace["_yr"] = int(y); dpace["_rd"] = int(r)
-        # team mapping for that race
+                                    
         d2t = _driver_team_map(raw_dir, y, r)
         if not d2t.empty:
             dpace = dpace.merge(d2t, on="Driver", how="left")
@@ -259,7 +259,6 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         per_race.append(dpace)
 
     if not per_race:
-        # no history → return skeleton for current drivers
         roster = _current_drivers(raw_dir, year, rnd)
         if not roster:
             return pd.DataFrame()
@@ -272,14 +271,14 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     all_dr = pd.concat(per_race, ignore_index=True)
     all_tm = pd.concat(team_means, ignore_index=True) if team_means else pd.DataFrame(columns=["Team","team_pace_z","_ord"])
 
-    # driver trend
+                  
     dtrend_rows = []
     for drv, g in all_dr.sort_values(["Driver","_ord"]).groupby("Driver"):
         slope = _lin_slope_last_k(g["pace_z"].tolist(), K)
         dtrend_rows.append({"Driver": drv, "driver_trend": slope})
     d_trend = pd.DataFrame(dtrend_rows)
 
-    # team dev trend
+                    
     t_trend = pd.DataFrame(columns=["Team","team_dev_trend"])
     if not all_tm.empty:
         rows = []
@@ -288,10 +287,10 @@ def featurize(ctx: Dict) -> pd.DataFrame:
             rows.append({"Team": tm, "team_dev_trend": slope})
         t_trend = pd.DataFrame(rows)
 
-    # stability of delta vs team
+                                
     stab_rows = []
     if "Team" in all_dr.columns and not all_tm.empty:
-        # attach team mean per same race order
+                                              
         tm_map = all_tm.set_index(["Team","_ord"]) ["team_pace_z"].to_dict()
         deltas = []
         for _, row in all_dr.iterrows():
@@ -309,16 +308,16 @@ def featurize(ctx: Dict) -> pd.DataFrame:
                 stab_rows.append({"Driver": drv, "stability_delta_vs_tm": _robust_std_iqr(vals)})
     stab = pd.DataFrame(stab_rows)
 
-    # current roster for broadcasting team trend
+                                                
     roster = _current_drivers(raw_dir, year, rnd)
     if not roster:
-        # as a fallback, use all drivers seen in history
+                                                        
         roster = all_dr["Driver"].astype(str).dropna().drop_duplicates().tolist()
 
     out = pd.DataFrame({"Driver": roster})
     out = out.merge(d_trend, on="Driver", how="left")
 
-    # join current team mapping to broadcast team trend
+                                                       
     d2t_now = _driver_team_map(raw_dir, year, rnd)
     if not d2t_now.empty and not t_trend.empty:
         out = out.merge(d2t_now, on="Driver", how="left").merge(t_trend, on="Team", how="left")

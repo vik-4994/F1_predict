@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 
 __all__ = ["featurize"]
 
-# ----------------------------- helpers -----------------------------
+                                                                     
 
 def _asof_mask(races: pd.DataFrame, year: int, rnd: int) -> pd.Series:
     y = pd.to_numeric(races.get('year'), errors='coerce')
@@ -171,7 +171,7 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
                 return laps[c].astype(str).dropna().drop_duplicates().tolist()
     return []
 
-# ----------------------------- core calcs -----------------------------
+                                                                        
 
 def _team_pitcrew_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int, prevN: int = 10) -> pd.DataFrame:
     prev = _list_prev_races(races, year, rnd, prevN)
@@ -200,7 +200,7 @@ def _team_pitcrew_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int
         return pd.DataFrame(columns=['Team','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','slowstop_risk_team'])
 
     pit = pd.concat(samples, ignore_index=True)
-    # trim outliers
+                   
     qlo, qhi = pit['duration_ms'].quantile([0.01, 0.99])
     pit = pit[(pit['duration_ms'] >= qlo) & (pit['duration_ms'] <= qhi)]
 
@@ -232,13 +232,13 @@ def _undercut_overcut_one_race(raw_dir: Path, y: int, r: int) -> Optional[Tuple[
     lt = laps[['Driver','lap','milliseconds']].dropna(subset=['lap','milliseconds']).copy()
     lt['milliseconds'] = pd.to_numeric(lt['milliseconds'], errors='coerce')
 
-    # mark pitted laps
+                      
     pp = ps[['Driver','lap']].dropna().drop_duplicates().copy()
     pp['pitted'] = True
     lt = lt.merge(pp, on=['Driver','lap'], how='left')
     lt['pitted'] = lt['pitted'].fillna(False)
 
-    # median non‑pit reference per lap
+                                      
     ref = (lt.loc[~lt['pitted']].groupby('lap', as_index=False)['milliseconds'].median().rename(columns={'milliseconds':'ref_ms'}))
 
     inlap  = pp.merge(lt, on=['Driver','lap'], how='left').rename(columns={'milliseconds':'in_ms'})
@@ -274,7 +274,7 @@ def _undercut_overcut_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd:
     for (y,r) in prev:
         if _event_slug(raw_dir, y, r) == cur_slug:
             same.append((y,r))
-    use = same if len(same) >= 2 else prev  # if too few same‑track, fall back to general window
+    use = same if len(same) >= 2 else prev                                                      
 
     vals_u: List[float] = []
     vals_o: List[float] = []
@@ -291,7 +291,7 @@ def _undercut_overcut_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd:
     o_med = float(np.median(vals_o)) if vals_o else np.nan
     return (u_med, o_med)
 
-# ----------------------------- main -----------------------------
+                                                                  
 
 def featurize(ctx: Dict) -> pd.DataFrame:
     """Build pit‑ops priors for the current event. Returns DF keyed by 'Driver'."""
@@ -301,15 +301,15 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     races = read_csv_if_exists(raw_dir / 'races.csv')
     drivers = _current_drivers(raw_dir, year, rnd)
     if not drivers:
-        return pd.DataFrame()  # nothing to broadcast onto
+        return pd.DataFrame()                             
 
-    # Team priors (pitcrew time & slowstop risk)
+                                                
     team_pr = _team_pitcrew_priors(raw_dir, races, year, rnd, prevN=int(ctx.get('pit_prevN', 10))) if not races.empty else pd.DataFrame()
 
-    # Undercut/overcut priors (same‑track if possible)
+                                                      
     u_med, o_med = _undercut_overcut_priors(raw_dir, races, year, rnd, prevN=int(ctx.get('pit_prevN', 10))) if not races.empty else (np.nan, np.nan)
 
-    # Current mapping Driver→Team to broadcast team priors
+                                                          
     d2t = _driver_team_map(raw_dir, year, rnd)
     out = pd.DataFrame({'Driver': drivers})
     if not d2t.empty and not team_pr.empty:

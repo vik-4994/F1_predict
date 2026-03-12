@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import re
 
-# Prefer project utils; provide minimal fallbacks if unavailable
+                                                                
 try:
     from .utils import read_csv_if_exists, ensure_driver_index, load_laps_enriched
 except Exception:  # pragma: no cover
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover
 
 __all__ = ["featurize"]
 
-# -------------------------- helpers --------------------------
+                                                               
 
 def _list_prev_races(raw_dir: Path, year: int, rnd: int, k: int) -> List[Tuple[int,int]]:
     races = read_csv_if_exists(raw_dir / "races.csv")
@@ -52,7 +52,7 @@ def _list_prev_races(raw_dir: Path, year: int, rnd: int, k: int) -> List[Tuple[i
         prev = df[(df["year"].astype(int) < year) | ((df["year"].astype(int) == year) & (df["round"].astype(int) < rnd))]
         tail = prev.tail(k)
         return list(zip(tail["year"].astype(int), tail["round"].astype(int)))
-    # fallback from filenames
+                             
     cand = []
     for p in raw_dir.glob("results_*_*.csv"):
         m = re.match(r"results_(\d{4})_(\d{1,2})\.csv$", p.name)
@@ -72,15 +72,15 @@ def _col(df: pd.DataFrame, options: Sequence[str]) -> Optional[str]:
 
 
 def _lap_col(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["Lap","lap","LapNumber","lap_number"])  # int
+    return _col(df, ["Lap","lap","LapNumber","lap_number"])       
 
 
 def _pos_col(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["Position","position","Pos","pos","PositionOrder"])  # int-like
+    return _col(df, ["Position","position","Pos","pos","PositionOrder"])            
 
 
 def _drv_col(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["Driver","driver","driverId","DriverId","name"])  # string id/name
+    return _col(df, ["Driver","driver","driverId","DriverId","name"])                  
 
 
 def _time_cols(df: pd.DataFrame) -> List[str]:
@@ -88,25 +88,25 @@ def _time_cols(df: pd.DataFrame) -> List[str]:
 
 
 def _gap_ahead_col(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["GapToAhead","gap_to_ahead","IntervalToCarAhead","interval_to_ahead","GapAhead","gapAhead","Interval","interval","GapToFront"])  # seconds
+    return _col(df, ["GapToAhead","gap_to_ahead","IntervalToCarAhead","interval_to_ahead","GapAhead","gapAhead","Interval","interval","GapToFront"])           
 
 
 def _pit_flag(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["IsPitLap","is_pit","Pit","pit","in_pit"])  # bool
+    return _col(df, ["IsPitLap","is_pit","Pit","pit","in_pit"])        
 
 
 def _sc_flag(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["IsSC","is_sc","SC","sc","IsVSC","is_vsc","VSC","vsc","YellowPhase"])  # bool
+    return _col(df, ["IsSC","is_sc","SC","sc","IsVSC","is_vsc","VSC","vsc","YellowPhase"])        
 
 
 def _grid_map(raw_dir: Path, y: int, r: int) -> Dict[str, float]:
-    # prefer qualifying; fallback to results.grid
+                                                 
     q = read_csv_if_exists(raw_dir / f"qualifying_{y}_{r}.csv")
     if not q.empty:
         d = _drv_col(q) or "Driver"
         p = _col(q, ["Position","position","pos"]) or None
         if p is None:
-            # fallback rank by order
+                                    
             q = q.copy(); q["__rk"] = np.arange(1, len(q)+1)
             return {str(a): float(b) for a,b in zip(q[d].astype(str), q["__rk"]) }
         return {str(a): float(b) for a,b in zip(q[d].astype(str), pd.to_numeric(q[p], errors="coerce"))}
@@ -128,7 +128,7 @@ def _to_seconds_any(x: pd.Series) -> pd.Series:
         return xn
     return pd.Series(np.nan, index=x.index)
 
-# --------------------- per-race metrics ---------------------
+                                                              
 
 def _race_lap1(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     """Return per-driver lap1_gain and lap1_incident (0/1)."""
@@ -144,7 +144,7 @@ def _race_lap1(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     if not grid:
         return pd.DataFrame(columns=["Driver","lap1_gain","lap1_incident"]) 
 
-    # pos after lap 1: last record with lap==1 per driver
+                                                         
     tmp = laps[pd.to_numeric(laps[lapc], errors="coerce") == 1].copy()
     if tmp.empty:
         return pd.DataFrame(columns=["Driver","lap1_gain","lap1_incident"]) 
@@ -158,7 +158,7 @@ def _race_lap1(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 
     tmp["lap1_gain"] = tmp["grid"] - tmp["pos1"]
 
-    # try race_events for incidents
+                                   
     inc = pd.Series(0.0, index=tmp.index)
     ev = read_csv_if_exists(raw_dir / f"race_events_{y}_{r}.csv")
     if not ev.empty:
@@ -170,7 +170,7 @@ def _race_lap1(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
                 violators = ev.loc[mask1 & bad, who].astype(str).unique().tolist()
                 inc = tmp["Driver"].isin(violators).astype(float)
     if inc.eq(0).all():
-        # fallback: big loss or pit on lap1
+                                           
         pitc = _pit_flag(laps)
         lost = (tmp["grid"] - tmp["pos1"]).fillna(0) <= -3
         if pitc is not None:
@@ -193,7 +193,7 @@ def _race_traffic_penalty(raw_dir: Path, y: int, r: int, dirty_gap_s: float = 1.
     if any(v is None for v in (lapc,dcol)) or gapc is None:
         return pd.DataFrame(columns=["Driver","traffic_penalty_s"]) 
 
-    # choose lap time column and convert to seconds
+                                                   
     ltcands = _time_cols(laps)
     if not ltcands:
         return pd.DataFrame(columns=["Driver","traffic_penalty_s"]) 
@@ -206,7 +206,7 @@ def _race_traffic_penalty(raw_dir: Path, y: int, r: int, dirty_gap_s: float = 1.
     df["gap_ahead_s"] = pd.to_numeric(laps[gapc], errors="coerce")
     df["lap_time_s"] = pd.to_numeric(lt_s, errors="coerce")
 
-    # exclude pit/SC if available
+                                 
     mask = pd.Series(True, index=df.index)
     pitc = _pit_flag(laps); scc = _sc_flag(laps)
     if pitc is not None:
@@ -214,7 +214,7 @@ def _race_traffic_penalty(raw_dir: Path, y: int, r: int, dirty_gap_s: float = 1.
     if scc is not None:
         mask &= ~laps[scc].astype(bool)
 
-    # reasonable lap time bounds to filter outliers
+                                                   
     mask &= df["lap_time_s"].between(40, 200)
 
     df = df[mask]
@@ -222,7 +222,7 @@ def _race_traffic_penalty(raw_dir: Path, y: int, r: int, dirty_gap_s: float = 1.
         return pd.DataFrame(columns=["Driver","traffic_penalty_s"]) 
 
     df["is_dirty"] = df["gap_ahead_s"] < dirty_gap_s
-    # need both regimes per driver
+                                  
     g = df.groupby("Driver")
     dirty = g.apply(lambda x: float(np.nanmean(x.loc[x["is_dirty"], "lap_time_s"])) if x["is_dirty"].any() else np.nan)
     clean = g.apply(lambda x: float(np.nanmean(x.loc[~x["is_dirty"], "lap_time_s"])) if (~x["is_dirty"]).any() else np.nan)
@@ -246,7 +246,7 @@ def _race_net_pass_index(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     df["__lap"] = pd.to_numeric(df[lapc], errors="coerce")
     df["__pos"] = pd.to_numeric(df[posc], errors="coerce")
 
-    # exclude pit and SC/VSC laps if columns exist
+                                                  
     mask = pd.Series(True, index=df.index)
     pitc = _pit_flag(laps); scc = _sc_flag(laps)
     if pitc is not None:
@@ -260,14 +260,14 @@ def _race_net_pass_index(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 
     def _per_driver(g: pd.DataFrame) -> pd.Series:
         g = g.sort_values("__lap").copy()
-        d = g["__pos"].diff()  # +1 = lost a place; -1 = gained
+        d = g["__pos"].diff()                                  
         gains = np.maximum(-d, 0)
         losses = np.maximum(d, 0)
         net = float(np.nansum(gains) - np.nansum(losses))
         green = float((g["__lap"].diff().fillna(0) > 0).sum())
         return pd.Series({"net_pass": net, "green_laps": green})
 
-    # pandas 2.2+: исключаем группирующие колонки из apply
+                                                          
     agg = (df.groupby("Driver", dropna=False)
             .apply(_per_driver, include_groups=False)
             .reset_index())
@@ -277,16 +277,16 @@ def _race_net_pass_index(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 def _safe_roster(raw_dir: Path, year: int, rnd: int, explicit):
     if explicit:
         return pd.Series(explicit, name="Driver", dtype=str)
-    # 1) entrylist по приоритету
+                                
     for name in (f"entrylist_{year}_{rnd}_Q.csv",
                  f"entrylist_{year}_{rnd}.csv",
-                 f"results_{year}_{rnd}_Q.csv"):  # допускаем только Q
+                 f"results_{year}_{rnd}_Q.csv"):                      
         df = read_csv_if_exists(raw_dir / name)
         if not df.empty:
             col = _drv_col(df)
             if col:
                 return df[col].astype(str).drop_duplicates().rename("Driver")
-    # 2) резерв — объединить всех пилотов из последних K прошедших гонок
+                                                                        
     pool = []
     for (y, r) in _list_prev_races(raw_dir, year, rnd, k=10):
         res = read_csv_if_exists(raw_dir / f"results_{y}_{r}.csv")
@@ -297,7 +297,7 @@ def _safe_roster(raw_dir: Path, year: int, rnd: int, explicit):
             if pool else pd.Series([], name="Driver", dtype=str))
 
 
-# ------------------------- main API -------------------------
+                                                              
 
 def featurize(ctx: Dict, lookback: int = 10) -> pd.DataFrame:
     """Compute pre‑race traffic/start/overtake features from last K past races.
@@ -307,7 +307,7 @@ def featurize(ctx: Dict, lookback: int = 10) -> pd.DataFrame:
     raw_dir = Path(ctx["raw_dir"]) if not isinstance(ctx.get("raw_dir"), Path) else ctx["raw_dir"]
     year = int(ctx["year"]); rnd = int(ctx["round"])  
 
-    # Resolve driver index to return
+                                    
     drivers = _safe_roster(raw_dir, year, rnd, ctx.get("drivers"))
     if drivers.empty:
         return pd.DataFrame()
@@ -340,7 +340,7 @@ def featurize(ctx: Dict, lookback: int = 10) -> pd.DataFrame:
         s = df.groupby("Driver")[key_in].mean()
         return pd.DataFrame({"Driver": s.index.astype(str), key_out: s.values})
 
-    # averages across races
+                           
     l1_gain = _avg(L1, "lap1_gain", "lap1_gain_avg_prev10")
     l1_inc  = _avg(L1, "lap1_incident", "lap1_incident_rate_prev10")
 
@@ -353,7 +353,7 @@ def featurize(ctx: Dict, lookback: int = 10) -> pd.DataFrame:
     else:
         net_pi = pd.DataFrame({"Driver": drivers, "net_pass_index_prev10": np.nan})
 
-    # merge & reindex to requested drivers order
+                                                
     out = (
         pd.DataFrame({"Driver": drivers})
         .merge(l1_gain, on="Driver", how="left")
@@ -362,7 +362,7 @@ def featurize(ctx: Dict, lookback: int = 10) -> pd.DataFrame:
         .merge(net_pi, on="Driver", how="left")
     )
 
-    # ensure numeric types
+                          
     for c in ["lap1_gain_avg_prev10","lap1_incident_rate_prev10","traffic_penalty_s_prev10","net_pass_index_prev10"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
 

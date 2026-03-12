@@ -1,4 +1,4 @@
-# FILE: src/training/utils.py
+                             
 from __future__ import annotations
 
 import os
@@ -20,9 +20,9 @@ except Exception:
     _HAS_TORCH = False
 
 
-# -----------------------------
-# Logging helpers
-# -----------------------------
+                               
+                 
+                               
 
 def _ts() -> str:
     """Timestamp like 2025-09-19 23:59:59"""
@@ -71,9 +71,9 @@ class Timer:
         return f"{m}m {s - 60*m:.1f}s"
 
 
-# -----------------------------
-# Reproducibility / device
-# -----------------------------
+                               
+                          
+                               
 
 def set_seed(seed: int = 42, deterministic: bool = True, cudnn_benchmark: bool = False):
     """
@@ -110,7 +110,7 @@ def get_device(requested: str = "auto") -> str:
     return "cpu"
 
 
-# Handy for DataLoader workers (if когда-нибудь пригодится)
+                                                           
 def make_worker_init_fn(seed: int):
     """
     Returns a worker_init_fn that sets per-worker seeds (NumPy + random).
@@ -123,9 +123,9 @@ def make_worker_init_fn(seed: int):
     return _init
 
 
-# -----------------------------
-# Small utilities
-# -----------------------------
+                               
+                 
+                               
 
 def count_parameters(model, trainable_only: bool = True) -> int:
     """Number of parameters in a torch model."""

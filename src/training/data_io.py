@@ -1,4 +1,4 @@
-# FILE: src/training/data_io.py
+                               
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,7 +10,7 @@ import numpy as np
 KEY = ["Driver", "year", "round"]
 
 
-# ---------- low-level IO ----------
+                                    
 
 def _read_table(path: Path) -> pd.DataFrame:
     """Read parquet or csv; return empty DF if file missing."""
@@ -26,7 +26,7 @@ def load_all(features_path: Path, targets_path: Path) -> tuple[pd.DataFrame, pd.
     """Load features and targets tables."""
     F = _read_table(features_path)
     T = _read_table(targets_path)
-    # normalize keys
+                    
     for df in (F, T):
         if "Driver" in df.columns:
             df["Driver"] = df["Driver"].astype(str)
@@ -37,7 +37,7 @@ def load_all(features_path: Path, targets_path: Path) -> tuple[pd.DataFrame, pd.
     return F, T
 
 
-# ---------- targets / join ----------
+                                      
 
 def _finish_pos_eff(tgt: pd.DataFrame, dnf_position: int = 21) -> pd.Series:
     """
@@ -74,7 +74,7 @@ def build_train_table(
     return df
 
 
-# ---------- timeline & split ----------
+                                        
 
 def races_list(df: pd.DataFrame) -> List[Tuple[int, int]]:
     """Sorted unique (year, round) from a DataFrame containing those columns."""
@@ -106,7 +106,7 @@ def time_split(df: pd.DataFrame, val_last: int = 6) -> tuple[pd.DataFrame, pd.Da
     return tr, va
 
 
-# ---------- convenience helpers ----------
+                                           
 
 def group_by_race(df: pd.DataFrame) -> list[pd.DataFrame]:
     """Return list of per-race DataFrames (sorted by (year, round))."""

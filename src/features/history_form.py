@@ -32,7 +32,7 @@ import pandas as pd
 
 __all__ = ["featurize"]
 
-# --------- настройки/константы ---------
+                                         
 DRIVER_COLS = ("Driver", "Abbreviation", "driverRef", "DriverRef", "DriverCode", "BroadcastName")
 TEAM_COLS   = ("Team", "TeamName", "Constructor", "ConstructorName", "ConstructorTeam")
 TIME_COLS   = ("LapTime_s", "LapTime", "LapTimeMs", "LapTimeSec", "LapTimeSeconds")
@@ -46,15 +46,15 @@ DNF_TOKENS  = (
 ROSTER_FILES = (
     "entrylist_{y}_{r}_Q.csv",
     "entrylist_{y}_{r}.csv",
-    "results_{y}_{r}_Q.csv",  # для состава команд безопасно
+    "results_{y}_{r}_Q.csv",                                
 )
 
 @dataclass
 class Options:
-    max_lookback: int = 10  # сколько прошлых гонок использовать (в сумме, назад по времени)
+    max_lookback: int = 10                                                                  
 
 
-# --------- утилиты ввода/поиска ---------
+                                          
 def _read_csv(p: Path) -> pd.DataFrame:
     try:
         if not p.exists():
@@ -75,7 +75,7 @@ def _detect_col(df: pd.DataFrame, cands: Sequence[str]) -> Optional[str]:
 
 def _to_seconds(series: pd.Series) -> pd.Series:
     s = series.copy()
-    # попытка распарсить как timedelta
+                                      
     try:
         td = pd.to_timedelta(s, errors="coerce")
         if td.notna().any():
@@ -84,11 +84,11 @@ def _to_seconds(series: pd.Series) -> pd.Series:
                 return sec
     except Exception:
         pass
-    # числовой фолбэк
+                     
     s = pd.to_numeric(s, errors="coerce")
     med = s.replace([np.inf, -np.inf], np.nan).median()
     if pd.notna(med) and med > 1e3:
-        return s / 1000.0  # похоже на миллисекунды
+        return s / 1000.0                          
     return s
 
 def _get_any(ctx_obj: Union[dict, object], keys: Sequence[str], default=None):
@@ -111,7 +111,7 @@ def _parse_build_from_text(txt: Optional[str]) -> Tuple[Optional[int], Optional[
         return int(m.group("y")), int(m.group("r"))
     return None, None
 
-# --------- поиск прошлых гонок по файлам в raw_dir ---------
+                                                             
 def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
     rounds = set()
     for pat in ("results_*.csv", "laps_*.csv", "entrylist_*.csv", "results_*_Q.csv", "entrylist_*_Q.csv"):
@@ -120,7 +120,7 @@ def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
             if m:
                 y, r = int(m.group(1)), int(m.group(2))
                 rounds.add((y, r))
-    out = sorted(rounds)  # по возрастанию (year, round)
+    out = sorted(rounds)                                
     return out
 
 def _list_past_by_files(raw_dir: Path, year: int, rnd: int, max_lookback: int) -> List[Tuple[int, int]]:
@@ -129,7 +129,7 @@ def _list_past_by_files(raw_dir: Path, year: int, rnd: int, max_lookback: int) -
     past.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return past[:max_lookback]
 
-# --------- состав/команды для целевого раунда (без утечек) ---------
+                                                                     
 def _load_roster_team_current(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     for pat in ROSTER_FILES:
         df = _read_csv(raw_dir / pat.format(y=year, r=rnd))
@@ -169,11 +169,11 @@ def _last_known_team_map(raw_dir: Path, past: List[Tuple[int, int]]) -> pd.DataF
     return last.reset_index(drop=True)
 
 def _is_green_flag(df: pd.DataFrame) -> pd.Series:
-    # FastF1/официальные логи: TrackStatus == '1' означает зелёный
+                                                                  
     if "TrackStatus" in df.columns:
         ts = df["TrackStatus"].astype(str).str.strip()
         return ts.isin({"1", 1})
-    # Если есть явные флаги — считаем зелёным, где ни один не активен
+                                                                     
     for c in ("SC", "VSC", "YellowFlag", "FullCourseYellow"):
         if c in df.columns:
             any_flag = pd.Series(False, index=df.index)
@@ -181,10 +181,13 @@ def _is_green_flag(df: pd.DataFrame) -> pd.Series:
                 if cc in df.columns:
                     any_flag |= df[cc].astype(bool)
             return ~any_flag
-    # иначе считаем все круги зелёными
+                                      
     return pd.Series(True, index=df.index)
 
-# --------- метрики круга (PACE) из laps ---------
+CLEAN_Z_LEFT  = -3.0
+CLEAN_Z_RIGHT =  2.0
+
+                                                  
 def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     p = raw_dir / f"laps_{y}_{r}.csv"
     df = _read_csv(p)
@@ -202,7 +205,7 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
         return pd.DataFrame()
     df["LapTime_s"] = _to_seconds(df[tcol])
 
-    # исключаем пит-ин/аут, если есть флаги
+                                           
     is_pit = pd.Series(False, index=df.index)
     for c in ("IsPitIn", "IsPitOut", "PitIn", "PitOut", "InPit", "OutPit"):
         if c in df.columns:
@@ -228,10 +231,10 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             med = float(s.median())
             mad = float((s - med).abs().median())
             if mad == 0 or not np.isfinite(mad):
-                clean_mask = s <= med  # деградація до медіани
+                clean_mask = s <= med                         
             else:
                 z = (s - med) / (1.4826 * mad)
-                clean_mask = (z > -0.5) & (z < 3.0)  # лівий «хвіст» трохи ширший, правий жорсткіше
+                clean_mask = (z > CLEAN_Z_LEFT) & (z < CLEAN_Z_RIGHT)                                                
             clean = s[clean_mask]
             clean_share = float(clean_mask.mean())
         else:
@@ -247,16 +250,16 @@ def _best10_and_clean_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             "clean_n": int(clean.size) if len(s) >= 3 else int(s.size)
         })
     out = pd.DataFrame(rows)
-    # race-level detrend для pace: вычитаем медиану best10_mean_s по пилотам
+                                                                            
     pace_med = float(out["best10_mean_s"].median(skipna=True)) if not out.empty else np.nan
     out["best10_rel_s"] = out["best10_mean_s"] - pace_med
 
-    # race-level detrend: вычитаем медиану по пелотону
+                                                      
     race_med = float(out["clean_share"].median(skipna=True)) if not out.empty else np.nan
     out["clean_share_detrended"] = out["clean_share"] - race_med
     return out
 
-# --------- DNF по results ---------
+                                    
 def _dnf_table_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     p = raw_dir / f"results_{y}_{r}.csv"
     df = _read_csv(p)
@@ -281,7 +284,7 @@ def _dnf_table_for_race(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
         dnf = dnf | s_up.eq("NC")
     return pd.DataFrame({"Driver": df["Driver"], "dnf": dnf.astype(float)})
 
-# --------- агрегации ---------
+                               
 def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if pace is None or pace.empty:
         pace_agg = pd.DataFrame(columns=[
@@ -307,22 +310,22 @@ def _aggregate(pace: pd.DataFrame, dnfs: pd.DataFrame) -> Tuple[pd.DataFrame, pd
             rel = pd.to_numeric(g.get("clean_share_detrended"), errors="coerce").astype(float)
             laps = pd.to_numeric(g.get("laps_n"), errors="coerce").fillna(0.0).clip(lower=0.0)
 
-            age = np.arange(len(g))[::-1]          # 0 — найостанніша гонка
+            age = np.arange(len(g))[::-1]                                  
             w_time = np.exp(-0.35 * age)
 
-            # мінімальна інформативність гонки: відсікти «порожні» або з <8 валідних кіл
+                                                                                        
             mask_inf = laps >= 8
             rel = rel.where(mask_inf)
             w = (laps.clip(0, 200) * w_time).where(mask_inf).fillna(0.0)
 
-            # winsorize детренд, щоб прибити хвости
+                                                   
             rel = pd.to_numeric(rel, errors="coerce").astype("float32")
             rel = pd.Series(np.clip(rel.to_numpy(copy=False), -0.50, 0.50), index=rel.index)
 
 
             cmean = float(np.nansum(rel * w) / np.nansum(w)) if np.nansum(w) > 0 else float("nan")
 
-            # фінальний кап вузькіший — стабілізує PSI/flip
+                                                           
             cmean = float(np.clip(cmean, -0.30, 0.30))
 
             last = g.sort_values(["year", "round"]).tail(1)[["year", "round"]].iloc[0] if not g.empty else {"year": pd.NA, "round": pd.NA}
@@ -373,7 +376,7 @@ def _team_stability(raw_dir: Path, past: List[Tuple[int, int]], current: pd.Data
     stab = comp.groupby("Driver")["eq"].mean().rename("hist_pre_team_stability").reset_index()
     return stab
 
-# --------- основная логика ---------
+                                     
 def _featurize_impl(
     raw_dir: Union[str, Path],
     year: int,
@@ -384,12 +387,12 @@ def _featurize_impl(
     raw_dir = Path(raw_dir)
     opt = options or Options()
 
-    # прошлые гонки (по файлам)
+                               
     past = _list_past_by_files(raw_dir, year, rnd, opt.max_lookback)
-    # «текущий» состав и команды (для сравнения, без утечек)
+                                                            
     current = _load_roster_team_current(raw_dir, year, rnd)
 
-    # собираем по прошлым гонкам pace и DNF
+                                           
     pace_rows, dnf_rows = [], []
     for (y, r) in past:
         pr = _best10_and_clean_for_race(raw_dir, y, r)
@@ -407,7 +410,7 @@ def _featurize_impl(
     pace_agg, dnf_agg = _aggregate(pace, dnfs)
     team_stab = _team_stability(raw_dir, past, current)
 
-    # база по пилотам: либо current roster, либо объединение из pace/dnfs
+                                                                         
     if roster:
         base = pd.DataFrame({"Driver": [str(x) for x in roster]}).drop_duplicates("Driver")
     elif current is not None and not current.empty:
@@ -420,14 +423,14 @@ def _featurize_impl(
                 .merge(dnf_agg, on="Driver", how="left")
                 .merge(team_stab, on="Driver", how="left"))
 
-    # типы
+          
     for c in ("hist_pre_hist_n", "hist_pre_last_seen_year", "hist_pre_last_seen_round"):
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
 
     return out
 
-# --------- публичный API ---------
+                                   
 def featurize(*args, **kwargs) -> pd.DataFrame:
     """
     Основной режим: featurize(ctx)
@@ -440,11 +443,11 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
     Совместимость: featurize(raw_dir, races_df, year, rnd, roster=None, options=None)
       races_df допускается None — модуль и так сканирует файлы.
     """
-    # Вариант 1: featurize(ctx)
+                               
     if len(args) == 1 and not kwargs and not isinstance(args[0], (str, Path)):
         ctx = args[0]
         raw_dir = _get_any(ctx, ["raw_dir", "raw", "rawPath", "raw_dir_path"], ".")
-        # year / round из множества ключей или из build_id
+                                                          
         year = _get_any(ctx, ["year", "season", "yr", "y", "build_year"], None)
         rnd  = _get_any(ctx, ["rnd", "round", "rd", "race", "build_round"], None)
         if year is None or rnd is None:
@@ -452,7 +455,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
             year = year if year is not None else by
             rnd  = rnd  if rnd  is not None else br
 
-        # roster (список/series/df)
+                                   
         roster = None
         roster_src = _get_any(ctx, ["roster", "drivers", "entrylist"], None)
         if roster_src is not None:
@@ -467,23 +470,23 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
         opt = Options(max_lookback=int(max_lookback))
 
         if year is None or rnd is None:
-            # без year/rnd невозможно исключить целевой этап
+                                                            
             raise TypeError("history_form.featurize(ctx): укажите 'year'/'season' и 'rnd'/'round' (или build_id вида 'YYYY_R').")
 
         return _featurize_impl(Path(raw_dir), int(year), int(rnd), roster=roster, options=opt)
 
-    # Вариант 2: старая сигнатура — races_df можно передать None
-    # featurize(raw_dir, races_df, year, rnd, roster=None, options=None)
+                                                                
+                                                                        
     if len(args) >= 4 and isinstance(args[0], (str, Path)):
         raw_dir, _races_df, year, rnd = args[:4]
         roster = args[4] if len(args) >= 5 else kwargs.get("roster")
         options = args[5] if len(args) >= 6 else kwargs.get("options")
         return _featurize_impl(Path(raw_dir), int(year), int(rnd), roster=roster, options=options or Options())
 
-    # если что-то иное — лучше явно сообщить
+                                            
     raise TypeError("history_form.featurize: ожидается featurize(ctx) или featurize(raw_dir, races_df, year, rnd, ...).")
 
-# --------- CLI (на всякий случай) ---------
+                                            
 if __name__ == "__main__":
     import argparse
 

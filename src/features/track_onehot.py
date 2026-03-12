@@ -28,7 +28,7 @@ import unicodedata
 import numpy as np
 import pandas as pd
 
-# -------------------- config --------------------
+                                                  
 
 DRIVER_COLS   = ("Driver", "Abbreviation", "driverRef", "DriverRef", "DriverCode", "BroadcastName")
 TEAM_COLS     = ("Team", "TeamName", "Constructor", "ConstructorName", "ConstructorTeam")
@@ -46,7 +46,7 @@ DNF_TOKENS = (
     "Fuel", "Oil leak", "Water pressure", "Power Unit", "PU",
 )
 
-# -------------------- utils --------------------
+                                                 
 
 def _read_csv(p: Path) -> pd.DataFrame:
     try:
@@ -141,7 +141,7 @@ def _ensure_driver_list(ctx, raw_dir: Path, year: int, rnd: int) -> list[str]:
             if vals: return vals
     return []
 
-# -------------------- calendar helpers --------------------
+                                                            
 
 def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
     rr = set()
@@ -169,13 +169,13 @@ def _list_past(races_df: Optional[pd.DataFrame], raw_dir: Path, year: int, rnd: 
             past = df[(df["year"] < year) | ((df["year"] == year) & (df["round"] < rnd))]
             past = past.sort_values(["year", "round"], ascending=[False, False]).head(max_lookback)
             return list(map(tuple, past[["year", "round"]].values.tolist()))
-    # fallback — по файлам
+                          
     all_rr = _scan_available_rounds(raw_dir)
     past = [(y, r) for (y, r) in all_rr if (y < year) or (y == year and r < rnd)]
     past.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return past[:max_lookback]
 
-# -------------------- results per round --------------------
+                                                             
 
 def _results_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     df = _read_csv(raw_dir / f"results_{y}_{r}.csv")
@@ -211,14 +211,14 @@ def _results_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     keep = [c for c in ["Driver","Team","Position","GridPosition","Points","DNF","year","round"] if c in df.columns]
     return df[keep]
 
-# -------------------- core --------------------
+                                                
 
 @dataclass
 class Options:
-    max_lookback: int = 20        # сколько прошлых раундов сканировать
-    include_onehot: bool = True   # делать ли track_is_<slug>
-    require_meta_match: bool = True  # матчить трек по meta_*; если False — пытаться сопоставлять по races_df именам
-    min_hist: int = 0             # минимальная история; если 0 — просто будут NaN/0
+    max_lookback: int = 20                                             
+    include_onehot: bool = False                              
+    require_meta_match: bool = True                                                                                 
+    min_hist: int = 0                                                               
 
 def _build_same_track_agg(raw_dir: Path, target_slug: str, past: List[Tuple[int,int]]) -> pd.DataFrame:
     """Собрать историю только по тем прошлым этапам, у которых slug(meta_{y}_{r}) совпадает с target_slug."""
@@ -234,7 +234,7 @@ def _build_same_track_agg(raw_dir: Path, target_slug: str, past: List[Tuple[int,
         return pd.DataFrame(columns=["Driver"])
     hist = pd.concat(rows, ignore_index=True)
 
-    # --- агрегаты по пилоту ---
+                                
     g = hist.groupby("Driver", dropna=False)
 
     def _p50(s: pd.Series) -> float:
@@ -255,11 +255,11 @@ def _build_same_track_agg(raw_dir: Path, target_slug: str, past: List[Tuple[int,
         "track_same_grid_p50": g["GridPosition"].apply(_p50),
     }).reset_index()
 
-    # last seen
+               
     last = g[["year","round"]].max().reset_index().rename(columns={"year":"track_same_last_seen_year", "round":"track_same_last_seen_round"})
     out = agg.merge(last, on="Driver", how="left")
 
-    # типы
+          
     for c in ("track_same_hist_n","track_same_last_seen_year","track_same_last_seen_round","track_same_bestpos_min"):
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
@@ -277,50 +277,50 @@ def _featurize_impl(
     raw_dir = Path(raw_dir)
     opt = options or Options()
 
-    # 1) Имя и slug трека
+                         
     name = track_name or _event_name_from_meta(raw_dir, year, rnd) or _event_name_from_races_df(races_df, year, rnd)
     if not name:
         name = _event_name_from_meta(raw_dir, year, rnd) or _event_name_from_races_df(races_df, year, rnd)
     slug = _slugify(name) if name else None
 
-    # 2) База пилотов
+                     
     drivers = [str(x) for x in (roster or [])]
     if not drivers:
         dummy_ctx = {"roster": None, "drivers": None}
         drivers = _ensure_driver_list(dummy_ctx, raw_dir, year, rnd)
     if not drivers:
-        return pd.DataFrame()  # empty
+        return pd.DataFrame()         
 
     base = pd.DataFrame({"Driver": drivers})
 
-    # 3) One-hot (по желанию)
+                             
     if opt.include_onehot:
         col = f"track_is_{slug}" if slug else "track_is_unknown"
         base[col] = 1
 
-    # 4) Same-track агрегации (только прошлое)
+                                              
     past = _list_past(races_df, raw_dir, year, rnd, max_lookback=opt.max_lookback)
     if slug:
         same = _build_same_track_agg(raw_dir, slug, past)
         if not same.empty:
             base = base.merge(same, on="Driver", how="left")
         else:
-            # если истории нет — аккуратно подложим дефолты
+                                                           
             for c in ["track_same_hist_n","track_same_finish_p50","track_same_bestpos_min",
                       "track_same_top10_rate","track_same_dnf_rate","track_same_points_mean",
                       "track_same_grid_p50","track_same_last_seen_year","track_same_last_seen_round"]:
                 base[c] = base.get(c, np.nan)
             base["track_same_hist_n"] = base["track_same_hist_n"].fillna(0).astype("Int64")
     else:
-        # неизвестный трек — только one-hot 'unknown' (если включено)
+                                                                     
         pass
 
     return base
 
-# -------------------- public API --------------------
+                                                      
 
 def featurize(*args, **kwargs) -> pd.DataFrame:
-    # ctx-режим
+               
     if len(args) == 1 and not kwargs and not isinstance(args[0], (str, Path)):
         ctx = args[0]
         get = (ctx.get if isinstance(ctx, dict) else lambda k, d=None: getattr(ctx, k, d))
@@ -361,7 +361,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
 
         return _featurize_impl(raw_dir, int(year), int(rnd), races_df=races_df, roster=roster, options=opts, track_name=track_name)
 
-    # старая сигнатура
+                      
     if len(args) >= 4 and isinstance(args[0], (str, Path)):
         raw_dir, races_df, year, rnd = args[:4]
         roster = args[4] if len(args) >= 5 else kwargs.get("roster")

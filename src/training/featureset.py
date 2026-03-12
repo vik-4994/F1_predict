@@ -1,4 +1,4 @@
-# src/training/featureset.py
+                            
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,9 +9,9 @@ import json
 import numpy as np
 import pandas as pd
 
-# =============================================================
-# Public types (kept for backwards-compat with __init__.py)
-# =============================================================
+                                                               
+                                                           
+                                                               
 
 @dataclass(frozen=True)
 class FeatureSpec:
@@ -21,68 +21,68 @@ class FeatureSpec:
     required: bool = False
     note: str = ""
 
-# Convenience alias used around the codebase
+                                            
 FeatureMatrix = Tuple[np.ndarray, Dict[str, object]]
 
 __all__ = [
-    # core API used by dataset/engine/inference
+                                               
     "select_feature_cols",
     "build_matrix",
     "FeatureScaler",
     "fit_scaler_on_df",
     "transform_with_scaler_df",
-    # back-compat aliases
+                         
     "fit_scaler",
     "transform_with_scaler",
-    # persistence helpers
+                         
     "save_feature_cols",
     "load_feature_cols",
-    # optional helpers
+                      
     "get_feature_groups",
-    # types
+           
     "FeatureMatrix",
     "FeatureSpec",
 ]
 
-# =============================================================
-# Feature selection
-# =============================================================
+                                                               
+                   
+                                                               
 
 _KEY = ["Driver", "year", "round"]
 
-# Columns we must never feed to the ranker (targets/metadata/post-factum)
+                                                                         
 _BLACKLIST = {
-    # keys / identifiers
+                        
     "year", "round",
-    # explicit targets / leaks
+                              
     "finish_position", "finish_pos", "finish_order", "position", "place",
-    "finish_pos_eff",  # computed effective target — must be excluded
-    # post-factum / outcome-like fields
+    "finish_pos_eff",                                                
+                                       
     "Points", "GridPosition", "Status", "Time",
 }
 
-# Доп. правила отбора:
-#  - категорические one-hot, которые оставляем как 0/1 и НЕ скейлим
+                      
+                                                                   
 _SAFE_ONEHOT_PREFIXES: Tuple[str, ...] = (
     "track_is_", "team_is_", "driver_is_", "track_cluster_"
 )
 
-#  - «плохие» паттерны, которые выкидываем из фичей
+                                                   
 _BLOCK_PATTERNS = (
-    r"_last_seen_(year|round)$",       # календарные подсказки — выкидываем
-    r"^(quali_pre|driver_team_pre).*_hist_n$",  # только эти hist_n режем
-    r"^quali_pre_pos_iqr$",            # ОСТАВИМ блокировку, но см. пункт 2 (fallback)
+    r"_last_seen_(year|round)$",                                           
+    r"^(quali_pre|driver_team_pre).*_hist_n$",                           
+    r"^quali_pre_pos_iqr$",                                                           
     r"^driver_team_pre_driver_finish_iqr$",
 )
 
 
-# extra prefixes we proactively treat as numeric even if dtype=object
-# based on pre-race feature modules
+                                                                     
+                                   
 _OBJECT_NUMERIC_PREFIXES = (
-    "driver_team_pre_", "driver_trackc_pre_",     # ← НОВОЕ
+    "driver_team_pre_", "driver_trackc_pre_",              
     "hist_pre_", "tele_pre_", "quali_pre_",
     "traffic_", "lap1_", "net_pass_",
-    "track_is_", "track_",                        # ← чтобы числовые track_* точно не застряли объектом
+    "track_is_", "track_",                                                                             
 )
 
 
@@ -110,9 +110,9 @@ def _coerce_object_featurelike(df: pd.DataFrame,
 
 
 def _numeric_columns(df: pd.DataFrame) -> List[str]:
-    # include numpy numbers, pandas extension ints/floats, and booleans
+                                                                       
     num = df.select_dtypes(include=[np.number, "number", "integer", "floating", "bool", "boolean"]).columns.tolist()
-    # keep order, drop dups just in case
+                                        
     seen: set = set()
     out: List[str] = []
     for c in num:
@@ -150,7 +150,7 @@ def select_feature_cols(
     if drop_all_nan:
         cols = [c for c in cols if not work[c].isna().all()]
 
-    # выкидываем нежелательные паттерны
+                                       
     if cols:
         import re
         keep: List[str] = []
@@ -160,14 +160,14 @@ def select_feature_cols(
                 keep.append(c)
         cols = keep
 
-    # лёгкий приоритет allow: если есть новая фича consistency — старая IQR уже и так отфильтрована
-    # ничего дополнительного делать не нужно
+                                                                                                   
+                                            
 
     return cols
 
-# =============================================================
-# Matrix building
-# =============================================================
+                                                               
+                 
+                                                               
 
 def _ensure_columns(df: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataFrame:
     out = df.copy()
@@ -185,14 +185,14 @@ def build_matrix(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureMatrix
     if df is None or df.empty:
         return np.zeros((0, len(feature_cols)), dtype=np.float32), {}
 
-    # normalize keys and coerce featurelike objects
+                                                   
     out = _ensure_columns(df, feature_cols)
     if "Driver" in out.columns:
         out["Driver"] = out["Driver"].astype(str)
 
     out = _coerce_object_featurelike(out)
 
-    # Booleans → 0/1, everything → float32
+                                          
     for c in feature_cols:
         if c in out.columns and out[c].dtype == "boolean":
             out[c] = out[c].astype("float32")
@@ -206,9 +206,9 @@ def build_matrix(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureMatrix
     }
     return X, meta
 
-# =============================================================
-# Scaler (fit on train → used in inference)
-# =============================================================
+                                                               
+                                           
+                                                               
 
 @dataclass
 class FeatureScaler:
@@ -216,7 +216,7 @@ class FeatureScaler:
     std: np.ndarray
     eps: float = 1e-6
 
-    # ---------- persistence ----------
+                                       
     def save(self, path: Path | str):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,11 +237,11 @@ class FeatureScaler:
         eps = float(obj.get("eps", 1e-6))
         return FeatureScaler(mean=mean, std=std, eps=eps)
 
-    # ---------- transform ----------
+                                     
     def transform(self, X: np.ndarray) -> np.ndarray:
         m = self.mean.astype(np.float32)
         s = self.std.astype(np.float32)
-        s = np.where(s < self.eps, 1.0, s)  # guard against zero-variance
+        s = np.where(s < self.eps, 1.0, s)                               
         return (X - m) / s
 
 
@@ -255,13 +255,13 @@ def fit_scaler_on_df(df: pd.DataFrame, feature_cols: Sequence[str]) -> FeatureSc
     X = d.loc[:, list(feature_cols)].to_numpy(dtype=np.float32, copy=False)
     mean = np.nanmean(X, axis=0)
     std = np.nanstd(X, axis=0)
-    # replace non-finite stats with safe constants
+                                                  
     mean = np.where(np.isfinite(mean), mean, 0.0).astype(np.float32)
     std = np.where(np.isfinite(std), std, 1.0).astype(np.float32)
-    # guard against tiny variance
+                                 
     std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
 
-    # НЕ скейлим безопасные one-hot: оставим их как 0/1.
+                                                        
     if feature_cols:
         oh_mask = np.array([any(str(c).startswith(p) for p in _SAFE_ONEHOT_PREFIXES)
                             for c in feature_cols], dtype=bool)
@@ -284,20 +284,20 @@ def transform_with_scaler_df(
     d = _ensure_columns(df, feature_cols)
     d = _coerce_object_featurelike(d)
     X = d.loc[:, list(feature_cols)].to_numpy(dtype=np.float32, copy=False)
-    # impute by mean before scaling
+                                   
     imputed = np.where(np.isnan(X), scaler.mean.astype(np.float32), X)
     Xs = scaler.transform(imputed)
     if as_array:
         return Xs
     return pd.DataFrame(Xs, columns=list(feature_cols), index=d.index)
 
-# Back-compat short aliases used in some scripts
+                                                
 fit_scaler = fit_scaler_on_df
 transform_with_scaler = transform_with_scaler_df
 
-# =============================================================
-# Persistence helpers for feature columns
-# =============================================================
+                                                               
+                                         
+                                                               
 
 def save_feature_cols(path: Path | str, feature_cols: Sequence[str]):
     path = Path(path)
@@ -310,14 +310,14 @@ def save_feature_cols(path: Path | str, feature_cols: Sequence[str]):
 def load_feature_cols(path: Path | str) -> List[str]:
     """Load feature column list from a text file (one per line)."""
     with open(path, "r", encoding="utf-8") as f:
-        # rstrip("") is invalid; use rstrip() to drop trailing newline/space
+                                                                            
         cols = [line.rstrip() for line in f]
-    # drop empties, preserve order
+                                  
     return [c for c in cols if c]
 
-# =============================================================
-# Optional: simple grouping (handy for debugging/EDA)
-# =============================================================
+                                                               
+                                                     
+                                                               
 
 def get_feature_groups(cols: Iterable[str]) -> Dict[str, List[str]]:
     groups: Dict[str, List[str]] = {}

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# локальные утилиты
+                   
 try:
     from .utils import ensure_driver_index
     from .track_onehot import _slugify, _event_slug_from_meta, _ensure_driver_list
@@ -50,7 +50,7 @@ except Exception:
     CLUSTERS = ("low_df", "balanced", "high_df")
     CLUSTER_ID = {c: i for i, c in enumerate(CLUSTERS)}
 
-# --------------- helpers: IO & parsing ---------------
+                                                       
 
 _CAND_DATE_COLS = [
     "EventStartTime", "SessionStart", "DateTime", "Date", "EventDate", "RaceStart",
@@ -81,7 +81,7 @@ def _to_int(s: pd.Series) -> pd.Series:
 
 
 def _coerce_pos(col: pd.Series) -> pd.Series:
-    # позиция может содержать "DNF" и т.п., приводим к числу
+                                                            
     s = pd.to_numeric(col, errors="coerce")
     return s
 
@@ -104,21 +104,21 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
             continue
         if df.empty:
             continue
-        # нормализуем имена
+                           
         cols = {c: c for c in df.columns}
-        # Year / Round
+                      
         if "Year" not in df.columns and "year" in df.columns:
             cols["year"] = "Year"
         if "Round" not in df.columns and "round" in df.columns:
             cols["round"] = "Round"
-        # Driver
+                
         if "Driver" not in df.columns:
             for c in ["DriverCode", "Code", "Abbreviation", "DriverId", "driver"]:
                 if c in df.columns:
                     cols[c] = "Driver"
                     break
         df = df.rename(columns=cols)
-        # позиции/очки/статус/грid
+                                  
         pos_col = next((c for c in _CAND_POS_COLS if c in df.columns), None)
         pts_col = next((c for c in _CAND_POINTS_COLS if c in df.columns), None)
         grd_col = next((c for c in _CAND_GRID_COLS if c in df.columns), None)
@@ -137,7 +137,7 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
             "Status": df[st_col].astype(str) if st_col else pd.Series([None]*len(df)),
         })
 
-        # событие/slug
+                      
         ev_name = None
         for c in _CAND_EVENT_NAME_COLS:
             if c in df.columns and df[c].notna().any():
@@ -148,7 +148,7 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
         out["EventName"] = ev_name
         out["EventSlug"] = out["EventName"].map(lambda s: _slugify(str(s)))
 
-        # время старта
+                      
         out["EventTime"] = _parse_datetime_cols(df)
         dfs.append(out)
 
@@ -156,7 +156,7 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     res = pd.concat(dfs, axis=0, ignore_index=True)
-    # Уберём явный мусор
+                        
     res = res.dropna(subset=["Year", "Round", "Driver"], how="any")
     res["Year"] = res["Year"].astype(int)
     res["Round"] = res["Round"].astype(int)
@@ -164,7 +164,7 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
 
 
 def _current_event_slug_and_cluster(ctx: dict, raw_dir: Path, year: int, rnd: int) -> Tuple[str, str]:
-    # try explicit track from ctx
+                                 
     if isinstance(ctx, dict):
         for k in ("track", "event", "circuit", "grand_prix", "race"):
             v = ctx.get(k)
@@ -172,16 +172,16 @@ def _current_event_slug_and_cluster(ctx: dict, raw_dir: Path, year: int, rnd: in
                 slug = _slugify(v)
                 cl = TRACK_TO_CLUSTER.get(slug, "balanced")
                 return slug, cl
-    # try meta
+              
     slug = _event_slug_from_meta(raw_dir, year, rnd) or ""
     cl = TRACK_TO_CLUSTER.get(slug, "balanced")
     return slug, cl
 
 
-# --------------- core ---------------
+                                      
 
 def _order_key(df: pd.DataFrame) -> pd.Series:
-    # сначала пытаемся по времени, иначе Year*100 + Round
+                                                         
     if "EventTime" in df.columns and df["EventTime"].notna().any():
         t = pd.to_datetime(df["EventTime"], errors="coerce")
         if t.notna().any():
@@ -204,7 +204,7 @@ def _is_retired(s: pd.Series) -> pd.Series:
 
 
 def _eb_blend(emp: pd.Series, base: float, k: float, n: pd.Series) -> pd.Series:
-    # shrinkage: (n*emp + k*base) / (n + k)
+                                           
     return ((n.astype(float) * emp.fillna(base)) + (k * base)) / (n.astype(float) + k)
 
 
@@ -212,19 +212,19 @@ def featurize(ctx: dict) -> pd.DataFrame:
     raw_dir = Path(ctx.get("raw_dir"))
     year = int(ctx.get("year"))
     rnd = int(ctx.get("round"))
-    hist_n = int(ctx.get("history_window", 8))  # по умолчанию 8 гонок
+    hist_n = int(ctx.get("history_window", 8))                        
 
     drivers = _ensure_driver_list(ctx, raw_dir, year, rnd)
     if not drivers:
         return pd.DataFrame()
 
-    # Текущий кластер
+                     
     cur_slug, cur_cluster = _current_event_slug_and_cluster(ctx, raw_dir, year, rnd)
 
-    # Загружаем историю
+                       
     res = _load_results(raw_dir)
     if res.empty:
-        # отдаём пустые, чтобы пайплайн не упал
+                                               
         base = {c: np.float32(np.nan) for c in [
             "driver_trackc_pre_finish_p50",
             "driver_trackc_pre_points_mean",
@@ -235,15 +235,15 @@ def featurize(ctx: dict) -> pd.DataFrame:
         ]}
         return ensure_driver_index(pd.Series(drivers), base)
 
-    # пометим кластер каждой исторической гонки
+                                               
     res["EventSlug"] = res["EventSlug"].fillna("")
     res["Cluster"] = res["EventSlug"].map(lambda s: TRACK_TO_CLUSTER.get(str(s), "balanced"))
 
-    # ключ порядка и фильтр ТОЛЬКО прошлых событий
+                                                  
     res["OrderKey"] = _order_key(res)
-    # current key
+                 
     cur_key = None
-    # попробуем найти время текущего события из res (тот же год/раунд/slug)
+                                                                           
     cur_rows = res[(res["Year"] == year) & (res["Round"] == rnd)]
     if not cur_rows.empty and cur_rows["EventTime"].notna().any():
         cur_key = pd.to_datetime(cur_rows["EventTime"], errors="coerce").max()
@@ -252,11 +252,11 @@ def featurize(ctx: dict) -> pd.DataFrame:
 
     res = res[res["OrderKey"] < cur_key]
 
-    # фильтр по кластеру текущей трассы
+                                       
     res = res[res["Cluster"] == cur_cluster]
 
     if res.empty:
-        # если нет истории по кластеру — вернём NaN, пусть модель/блендер работает дальше
+                                                                                         
         base = {c: np.float32(np.nan) for c in [
             "driver_trackc_pre_finish_p50",
             "driver_trackc_pre_points_mean",
@@ -267,7 +267,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
         ]}
         return ensure_driver_index(pd.Series(drivers), base)
 
-    # оставим только нужные колонки и почистим типы
+                                                   
     res = res[["Driver", "Year", "Round", "Points", "Pos", "Grid", "Status", "OrderKey"]].copy()
     res["Points"] = pd.to_numeric(res["Points"], errors="coerce").fillna(0.0)
     res["Pos_num"] = pd.to_numeric(res["Pos"], errors="coerce")
@@ -275,14 +275,14 @@ def featurize(ctx: dict) -> pd.DataFrame:
     res["top10"] = res["Pos_num"].between(1, 10, inclusive="both")
     res["retired"] = _is_retired(res["Status"]).astype(bool)
 
-    # выберем последние hist_n гонок ДЛЯ КАЖДОГО PILOT в этом кластере
-    res = res.sort_values(["Driver", "OrderKey"])  # стабильная сортировка
+                                                                      
+    res = res.sort_values(["Driver", "OrderKey"])                         
     res["rn"] = res.groupby("Driver").cumcount(ascending=True)
-    # оставим только последние hist_n по каждому пилоту
+                                                       
     max_rn = res.groupby("Driver")["rn"].transform("max")
     res = res[(max_rn - res["rn"]) < hist_n]
 
-    # агрегаты по пилоту
+                        
     agg = res.groupby("Driver").agg(
         hist_n=("Pos_num", lambda s: int(s.notna().sum())),
         finish_p50=("Pos_num", lambda s: float(np.nanpercentile(s, 50)) if s.notna().any() else np.nan),
@@ -292,8 +292,8 @@ def featurize(ctx: dict) -> pd.DataFrame:
         retire_rate=("retired", "mean"),
     ).reset_index()
 
-    # кластерные бенчмарки (по всем пилотам) для сглаживания
-    # NB: берём бенч по тому же набору строк res
+                                                            
+                                                
     base_finish = float(np.nanmedian(agg["finish_p50"])) if agg["finish_p50"].notna().any() else np.nan
     base_points = float(agg["points_mean"].mean()) if agg["points_mean"].notna().any() else 0.0
     base_top10  = float(agg["top10_rate"].mean()) if agg["top10_rate"].notna().any() else 0.0
@@ -301,7 +301,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     base_ret    = float(agg["retire_rate"].mean()) if agg["retire_rate"].notna().any() else 0.0
 
     n = agg["hist_n"].astype(float)
-    # Коэффициенты сглаживания: чем меньше n, тем сильнее тянем к среднему кластера
+                                                                                   
     k_fin, k_pts, k_top, k_grid, k_ret = 3.0, 6.0, 6.0, 3.0, 6.0
 
     agg["finish_p50_blend"] = _eb_blend(agg["finish_p50"], base_finish, k_fin, n)
@@ -310,7 +310,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     agg["grid_p50_blend"] = _eb_blend(agg["grid_p50"], base_grid, k_grid, n)
     agg["retire_rate_blend"] = _eb_blend(agg["retire_rate"], base_ret, k_ret, n)
 
-    # формируем выходные колонки
+                                
     out = agg[["Driver"]].copy()
     out["driver_trackc_pre_finish_p50"] = agg["finish_p50_blend"].astype("float32")
     out["driver_trackc_pre_points_mean"] = agg["points_mean_blend"].astype("float32")
@@ -319,7 +319,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     out["driver_trackc_pre_retire_rate"] = agg["retire_rate_blend"].astype("float32")
     out["driver_trackc_pre_hist_n"] = agg["hist_n"].astype("float32")
 
-    # Размножаем по текущему списку водителей; те, у кого нет истории, получат NaN (или можно заполнить бенчмарком)
+                                                                                                                   
     out = ensure_driver_index(pd.Series(drivers), out.set_index("Driver").to_dict(orient="index"))
 
     return out

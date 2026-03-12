@@ -31,7 +31,7 @@ import re
 import numpy as np
 import pandas as pd
 
-# ----------------------------- I/O utils -----------------------------
+                                                                       
 
 DRIVER_COLS = ("Driver", "Abbreviation", "driverRef", "DriverRef", "DriverCode", "BroadcastName")
 TEAM_COLS   = ("Team", "TeamName", "Constructor", "ConstructorName", "ConstructorTeam")
@@ -60,7 +60,7 @@ def _detect_col(df: pd.DataFrame, cands: Sequence[str]) -> Optional[str]:
             return low[c.lower()]
     return None
 
-# ----------------------------- Calendar -----------------------------
+                                                                      
 
 def _list_past(races_df: pd.DataFrame, year: int, rnd: int, max_lookback: int) -> List[Tuple[int, int]]:
     if races_df is None or races_df.empty:
@@ -72,7 +72,7 @@ def _list_past(races_df: pd.DataFrame, year: int, rnd: int, max_lookback: int) -
     df = races_df[[ycol, rcol]].copy()
     df.columns = ["year", "round"]
 
-    # приведение к числам на всякий случай
+                                          
     df["year"] = pd.to_numeric(df["year"], errors="coerce")
     df["round"] = pd.to_numeric(df["round"], errors="coerce")
 
@@ -102,12 +102,12 @@ def _list_past_by_scan(raw_dir: Path, year: int, rnd: int, max_lookback: int) ->
     past.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return past[:max_lookback]
 
-# -------------------- Current roster & team (SAFE) --------------------
+                                                                        
 
 _ROSTER_FILES = (
     "entrylist_{y}_{r}_Q.csv",
     "entrylist_{y}_{r}.csv",
-    "results_{y}_{r}_Q.csv",   # safe (qual only)
+    "results_{y}_{r}_Q.csv",                     
 )
 
 def _current_roster_team(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
@@ -125,7 +125,7 @@ def _current_roster_team(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
         out = out.dropna(subset=["Driver"]).drop_duplicates("Driver")
         if not out.empty:
             return out[["Driver","Team"]]
-    return pd.DataFrame(columns=["Driver","Team"])  # may be empty
+    return pd.DataFrame(columns=["Driver","Team"])                
 
 def _last_known_team(raw_dir: Path, past: List[Tuple[int, int]]) -> pd.DataFrame:
     rows: List[pd.DataFrame] = []
@@ -148,7 +148,7 @@ def _last_known_team(raw_dir: Path, past: List[Tuple[int, int]]) -> pd.DataFrame
     last = hist.groupby("Driver").tail(1)[["Driver","Team"]]
     return last.reset_index(drop=True)
 
-# --------------------------- Past results ---------------------------
+                                                                      
 
 _DNF_TOKENS = (
     "DNF", "Accident", "Collision", "Engine", "Hydraulics", "Electrical",
@@ -188,7 +188,7 @@ def _results_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
         df["DNF"] = np.nan
     return df[[c for c in ["Driver","Team","Position","GridPosition","Points","DNF"] if c in df.columns]]
 
-# ---------------------------- Aggregations ----------------------------
+                                                                        
 
 def _agg_driver(g: pd.DataFrame) -> pd.Series:
     pos = pd.to_numeric(g.get("Position"), errors="coerce")
@@ -234,7 +234,7 @@ def _agg_team(g: pd.DataFrame) -> pd.Series:
         "driver_team_pre_team_points_mean": pts_mean,
     })
 
-# ------------------------------- API -------------------------------
+                                                                     
 
 @dataclass
 class Options:
@@ -253,11 +253,11 @@ def _featurize_impl(
     raw_dir = Path(raw_dir)
     opt = options or Options()
 
-    # прошлые гонки
-    past = _list_past(races_df, year, rnd, max_lookback=opt.max_lookback) if races_df is not None else \
+                   
+    past = _list_past(races_df, year, rnd, max_lookback=opt.max_lookback) if races_df is not None else\
            _list_past_by_scan(raw_dir, year, rnd, max_lookback=opt.max_lookback)
 
-    # собираем прошлые результаты
+                                 
     rows = []
     for (y, r) in past:
         tbl = _results_table(raw_dir, y, r)
@@ -269,7 +269,7 @@ def _featurize_impl(
     else:
         hist = pd.DataFrame(columns=["Driver","Team","Position","GridPosition","Points","DNF","year","round"])
 
-    # агрегаты по пилотам/командам
+                                  
     drv_agg = (
         hist.groupby("Driver", dropna=False)
             .apply(_agg_driver, include_groups=False)
@@ -282,7 +282,7 @@ def _featurize_impl(
             .reset_index()
     ) if not hist.empty else pd.DataFrame(columns=["Team"])
 
-    # текущая команда (без утечек)
+                                  
     cur = _current_roster_team(raw_dir, year, rnd)
     if cur.empty:
         cur = _last_known_team(raw_dir, past)
@@ -290,20 +290,20 @@ def _featurize_impl(
     if roster:
         cur = pd.DataFrame({"Driver": list(roster)}).merge(cur, on="Driver", how="left")
 
-    # базовый список пилотов
+                            
     if cur.empty:
         drivers = sorted(set(hist["Driver"].dropna().astype(str)))
         base = pd.DataFrame({"Driver": drivers})
     else:
         base = cur[["Driver","Team"]].drop_duplicates("Driver")
 
-    # join
+          
     out = base.merge(drv_agg, on="Driver", how="left")
     if "Team" in base.columns and not team_agg_raw.empty:
         out = out.merge(team_agg_raw.rename(columns={"Team":"_join_team"}), left_on="Team", right_on="_join_team", how="left")
         out = out.drop(columns=[c for c in out.columns if c == "_join_team"])
 
-    # last seen
+               
     if not hist.empty:
         last_seen = (
             hist.sort_values(["Driver", "year", "round"])
@@ -317,7 +317,7 @@ def _featurize_impl(
         out["driver_team_pre_last_seen_year"] = pd.NA
         out["driver_team_pre_last_seen_round"] = pd.NA
 
-    # типы
+          
     for c in ("driver_team_pre_driver_hist_n", "driver_team_pre_team_hist_n",
               "driver_team_pre_last_seen_year", "driver_team_pre_last_seen_round"):
         if c in out.columns:
@@ -325,7 +325,7 @@ def _featurize_impl(
 
     return out
 
-# ------------------------------- CLI -------------------------------
+                                                                     
 if __name__ == "__main__":
     import argparse
 
@@ -354,7 +354,7 @@ if __name__ == "__main__":
     out.to_csv(args.out, index=False)
     print(f"Saved driver/team priors to {args.out} (rows={len(out)})")
 
-# ------------------------------- Wrapper -------------------------------
+                                                                         
 
 def featurize(*args: Any, **kwargs: Any) -> pd.DataFrame:
     """
@@ -363,13 +363,13 @@ def featurize(*args: Any, **kwargs: Any) -> pd.DataFrame:
         Поддерживаются ключи: year/season, rnd/round, build_id='YYYY_R'; roster/drivers; max_lookback.
       - featurize(raw_dir, races_df, year, rnd, roster=None, options=None)
     """
-    # ctx-style
+               
     if len(args) == 1 and not kwargs and not isinstance(args[0], (str, Path)):
         ctx = args[0]
         get = (ctx.get if isinstance(ctx, dict) else lambda k, d=None: getattr(ctx, k, d))
         raw_dir = Path(get("raw_dir", get("raw", ".")))
 
-        # races_df: direct, via CSV, или по файлам
+                                                  
         races_df = get("races_df", None)
         races_csv = get("races_csv", None)
         if races_df is None and races_csv is not None:
@@ -380,7 +380,7 @@ def featurize(*args: Any, **kwargs: Any) -> pd.DataFrame:
         if races_df is None:
             races_df = _calendar_df_from_files(raw_dir)
 
-        # ids
+             
         year = get("year", get("season", None))
         rnd  = get("rnd", get("round", None))
         if year is None or rnd is None:
@@ -393,7 +393,7 @@ def featurize(*args: Any, **kwargs: Any) -> pd.DataFrame:
         if year is None or rnd is None:
             raise TypeError("driver_team_priors_pre.featurize(ctx): укажите 'year'/'season' и 'rnd'/'round' (или build_id 'YYYY_R').")
 
-        # roster
+                
         roster = get("roster", get("drivers", None))
         if isinstance(roster, pd.DataFrame):
             c = _detect_col(roster, DRIVER_COLS)
@@ -404,5 +404,5 @@ def featurize(*args: Any, **kwargs: Any) -> pd.DataFrame:
         opts = Options(max_lookback=max_lb)
         return _featurize_impl(raw_dir, races_df, int(year), int(rnd), roster=roster, options=opts)
 
-    # positional legacy
+                       
     return _featurize_impl(*args, **kwargs)

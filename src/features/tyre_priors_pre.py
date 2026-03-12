@@ -43,7 +43,7 @@ except Exception:  # pragma: no cover
 
 __all__ = ["featurize"]
 
-# ----------------------------- helpers -----------------------------
+                                                                     
 
 def _asof_mask(races: pd.DataFrame, year: int, rnd: int) -> pd.Series:
     y = pd.to_numeric(races.get("year"), errors="coerce")
@@ -139,7 +139,7 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
     if laps is None or laps.empty:
         return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound"])  
     df = laps.copy()
-    # map compound to S/M/H
+                           
     comp_col = None
     for c in ("Compound","compound","Tyre","tyre"):
         if c in df.columns:
@@ -150,24 +150,24 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
     df["C"] = df[comp_col].astype(str).map(lambda x: m.get(x, np.nan))
     df = df.dropna(subset=["C"]).copy()
 
-    # exclude in/out laps using pit table
+                                         
     if pits is not None and not pits.empty and {"Driver","lap"}.issubset(pits.columns):
         ex = pits[["Driver","lap"]].dropna().copy()
         ex["lap"] = pd.to_numeric(ex["lap"], errors="coerce").astype("Int64")
         ex = ex.dropna(subset=["lap"]).astype({"lap":int})
         excl = pd.concat([ex.assign(excl=ex["lap"]), ex.assign(excl=ex["lap"]+1)])[ ["Driver","excl"] ]
         df = df.merge(excl, left_on=["Driver","lap"], right_on=["Driver","excl"], how="left")
-        df = df[df["excl"].isna()].drop(columns=["excl"])  # keep clean laps
+        df = df[df["excl"].isna()].drop(columns=["excl"])                   
 
     return df.rename(columns={"C":"Compound"})[ [c for c in ("raceId","Driver","lap","milliseconds","Compound") if c in df.columns] ]
 
 
-# ----------------------------- core calcs -----------------------------
+                                                                        
 
 def _compound_mix_per_race_from_laps(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "Compound" not in df.columns:
         return pd.DataFrame(columns=["raceId","frac_S","frac_M","frac_H"])  
-    mix = (df.groupby(["raceId","Compound"])  # race‑level mix across field
+    mix = (df.groupby(["raceId","Compound"])                               
              .size().rename("laps").reset_index()
              .pivot(index="raceId", columns="Compound", values="laps").fillna(0))
     mix = mix.div(mix.sum(axis=1), axis=0)
@@ -241,7 +241,7 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
                 return laps[c].astype(str).dropna().drop_duplicates().tolist()
     return []
 
-# ----------------------------- main -----------------------------
+                                                                  
 
 def featurize(ctx: dict) -> pd.DataFrame:
     raw_dir = Path(ctx.get("raw_dir", "data/raw_csv"))
@@ -249,7 +249,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
 
     races = read_csv_if_exists(raw_dir / "races.csv")
 
-    # choose history races: prefer same‑track, else last 8 overall strictly before (year, round)
+                                                                                                
     prev = _list_prev_races(races, year, rnd, prevN=12) if not races.empty else []
     cur_slug = _event_slug(raw_dir, year, rnd)
     same: List[Tuple[int,int]] = []
@@ -259,7 +259,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
                 same.append((y,r))
     use = same if len(same) >= 3 else prev[-8:]
 
-    # build per‑race compound mix and deltas
+                                            
     mix_rows: List[pd.DataFrame] = []
     delta_rows: List[pd.DataFrame] = []
     for (y,r) in use:
@@ -279,7 +279,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
                 mix = _compound_mix_per_race_from_stints(st)
                 if not mix.empty:
                     mix_rows.append(mix)
-            # deltas из стинтов нельзя получить — пропускаем
+                                                            
 
     if mix_rows:
         mix_all = pd.concat(mix_rows, ignore_index=True)
@@ -296,7 +296,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     else:
         d_SM = d_MH = np.nan
 
-    # degradation baselines (field median) with temperature adjustment
+                                                                      
     try:
         w_now = feat_weather({**ctx, "mode": "forecast"})
     except Exception:
@@ -326,20 +326,20 @@ def featurize(ctx: dict) -> pd.DataFrame:
         base_M = _pick_deg(hist, ["avg_deg_medium_prev3", "deg_slope_hist_M", "deg_medium_prev3", "deg_slope_mean_M"]) 
         base_H = _pick_deg(hist, ["avg_deg_hard_prev3", "deg_slope_hist_H", "deg_hard_prev3", "deg_slope_mean_H"]) 
         if not np.isfinite(base_S) and not np.isfinite(base_M) and not np.isfinite(base_H):
-            # fallback to a single overall slope if present
+                                                           
             g = _pick_deg(hist, ["deg_slope_mean", "deg_slope_hist", "deg_prev3"])
             base_S = base_M = base_H = g if np.isfinite(g) else np.nan
 
-    coef = float(ctx.get("deg_temp_coef", 0.015))  # per +1°C vs 25°C
+    coef = float(ctx.get("deg_temp_coef", 0.015))                    
     td = float(track_temp) - 25.0
     exp_S = base_S * (1.0 + coef * td) if np.isfinite(base_S) else np.nan
     exp_M = base_M * (1.0 + coef * td) if np.isfinite(base_M) else np.nan
     exp_H = base_H * (1.0 + coef * td) if np.isfinite(base_H) else np.nan
 
-    # roster for current race
+                             
     drivers = _current_drivers(raw_dir, year, rnd)
     if not drivers:
-        return pd.DataFrame()  # nothing to broadcast onto
+        return pd.DataFrame()                             
 
     out = pd.DataFrame({"Driver": drivers})
     out["compound_mix_priors_S"] = frac_S

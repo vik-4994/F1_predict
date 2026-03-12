@@ -25,12 +25,12 @@ import re
 import numpy as np
 import pandas as pd
 
-# -------------------- колонки/утилиты --------------------
+                                                           
 
 DRIVER_COLS = ("Driver", "Abbreviation", "driverRef", "DriverRef", "DriverCode", "BroadcastName")
 TEAM_COLS   = ("Team", "TeamName", "Constructor", "ConstructorName", "ConstructorTeam")
 
-# для квал-позиций берём специализированные названия в приоритете
+                                                                 
 QUALI_POS_CANDS = ("QualiPosition", "QPosition", "Q_Pos", "QualifyingPosition")
 POS_COLS        = ("Position", "position", "ResultPosition", "FinishPosition", *QUALI_POS_CANDS)
 
@@ -44,10 +44,10 @@ NO_TIME_TOKENS = (
 )
 
 QUALI_PATTERNS = (
-    "results_{y}_{r}_Q.csv",   # основная квалификация
-    "qualifying_{y}_{r}.csv",  # альтернативное именование
-    "quali_{y}_{r}.csv",       # ещё одно
-    "results_{y}_{r}_SQ.csv",  # спринт-квалификация, если есть
+    "results_{y}_{r}_Q.csv",                          
+    "qualifying_{y}_{r}.csv",                             
+    "quali_{y}_{r}.csv",                 
+    "results_{y}_{r}_SQ.csv",                                  
 )
 
 ENTRY_PATTERNS = (
@@ -74,7 +74,7 @@ def _detect_col(df: pd.DataFrame, cands: Sequence[str]) -> Optional[str]:
             return low[c.lower()]
     return None
 
-# -------------------- календарь --------------------
+                                                     
 
 def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
     rr = set()
@@ -92,7 +92,7 @@ def _calendar_df_from_files(raw_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(pairs, columns=["year", "round"]).sort_values(["year", "round"]).reset_index(drop=True)
 
 def _list_past(races_df: Optional[pd.DataFrame], raw_dir: Path, year: int, rnd: int, max_lookback: int) -> List[Tuple[int, int]]:
-    # сначала races_df, если дан
+                                
     if races_df is not None and not races_df.empty:
         ycol = next((c for c in races_df.columns if c.lower() in ("year", "season")), None)
         rcol = next((c for c in races_df.columns if c.lower() == "round"), None)
@@ -103,13 +103,13 @@ def _list_past(races_df: Optional[pd.DataFrame], raw_dir: Path, year: int, rnd: 
             past = df[(df["year"] < year) | ((df["year"] == year) & (df["round"] < rnd))]
             past = past.sort_values(["year", "round"], ascending=[False, False]).head(max_lookback)
             return list(map(tuple, past[["year", "round"]].values.tolist()))
-    # иначе — по файлам
+                       
     all_rr = _scan_available_rounds(raw_dir)
     past = [(y, r) for (y, r) in all_rr if (y < year) or (y == year and r < rnd)]
     past.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return past[:max_lookback]
 
-# -------------------- данные по текущему этапу --------------------
+                                                                    
 
 def _current_roster(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
     for pat in ENTRY_PATTERNS:
@@ -138,7 +138,7 @@ def _last_known_roster_from_quali(raw_dir: Path, past: List[Tuple[int, int]]) ->
                     return out
     return pd.DataFrame(columns=["Driver"])
 
-# -------------------- чтение квал-таблицы --------------------
+                                                               
 
 def _qualifying_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     df = pd.DataFrame()
@@ -173,7 +173,7 @@ def _qualifying_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     if pcol:
         df["Points"] = pd.to_numeric(df[pcol], errors="coerce")
 
-    # статус → индикатор no-time/penalty (включая DNS/DSQ)
+                                                          
     if scol:
         s = df[scol].astype(str).str.upper()
         bad = s.eq("NC") | s.eq("DNS") | s.eq("DNF") | s.eq("DSQ")
@@ -181,23 +181,23 @@ def _qualifying_table(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
             bad = bad | s.str.contains(tok, case=False, na=False)
         df["NoTimeOrPen"] = bad.astype(float)
     else:
-        # в некоторых наборах нет статуса — считаем "нет времени", если позиция NaN
+                                                                                   
         df["NoTimeOrPen"] = df["QualiPos"].isna().astype(float)
 
     df["year"] = y; df["round"] = r
     keep = [c for c in ["Driver","Team","QualiPos","GridPosition","Points","NoTimeOrPen","year","round"] if c in df.columns]
     return df[keep]
 
-# -------------------- агрегации --------------------
+                                                     
 
 def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
     if hist.empty:
         return pd.DataFrame(columns=["Driver"])
 
-    # --- race-level detrend: позицию в квале делаем относительной ---
+                                                                      
     h = hist.copy()
     h["QualiPos"] = pd.to_numeric(h["QualiPos"], errors="coerce")
-    # медиана по пелотону в конкретной квале
+                                            
     field_med = (
         h.groupby(["year", "round"], dropna=False)["QualiPos"]
          .median()
@@ -205,7 +205,7 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
          .reset_index()
     )
     h = h.merge(field_med, on=["year", "round"], how="left")
-    # относительная позиция: капим хвост для устойчивости PSI
+                                                             
     h["QualiPos_rel"] = (h["QualiPos"] - h["field_med"]).clip(-5, 5)
 
     g = h.groupby("Driver", dropna=False)
@@ -218,11 +218,11 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
         x = pd.to_numeric(s, errors="coerce").dropna().to_numpy()
         return float(np.nanpercentile(x, 75) - np.nanpercentile(x, 25)) if x.size >= 2 else np.nan
 
-    # базовые агрегации (оставляем совместимость имён)
+                                                      
     out = pd.DataFrame({
         "quali_pre_hist_n": g.size().astype(int),
-        "quali_pre_pos_p50": g["QualiPos"].apply(p50),                 # медиана сырой позиции (для интерпретации)
-        "quali_pre_pos_iqr": g["QualiPos_rel"].apply(iqr),             # IQR по ОТНОСИТЕЛЬНОЙ позиции (снижаем PSI)
+        "quali_pre_pos_p50": g["QualiPos"].apply(p50),                                                            
+        "quali_pre_pos_iqr": g["QualiPos_rel"].apply(iqr),                                                         
         "quali_pre_bestpos_min": g["QualiPos"].min().astype("float"),
         "quali_pre_top10_rate": g["QualiPos"].apply(
             lambda s: float((pd.to_numeric(s, errors="coerce") <= 10).mean()) if s.notna().any() else np.nan
@@ -231,28 +231,28 @@ def _agg_quali(hist: pd.DataFrame) -> pd.DataFrame:
         "quali_pre_points_mean": (g["Points"].mean() if "Points" in h.columns else pd.Series(dtype=float)),
     }).reset_index()
 
-    # добавляем «правильное направление»: больше = стабильнее
+                                                             
     out["quali_pre_pos_consistency"] = -g["QualiPos_rel"].apply(iqr)
 
-    # last seen (макс. год/раунд)
+                                 
     last = g[["year", "round"]].max().reset_index().rename(columns={
         "year": "quali_pre_last_seen_year",
         "round": "quali_pre_last_seen_round"
     })
     out = out.merge(last, on="Driver", how="left")
 
-    # типы
+          
     for c in ("quali_pre_hist_n","quali_pre_last_seen_year","quali_pre_last_seen_round","quali_pre_bestpos_min"):
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
     return out
 
 
-# -------------------- ядро --------------------
+                                                
 
 @dataclass
 class Options:
-    max_lookback: int = 30  # сколько прошлых этапов искать (с запасом)
+    max_lookback: int = 30                                             
 
 def _featurize_impl(
     raw_dir: Union[str, Path],
@@ -265,7 +265,7 @@ def _featurize_impl(
     raw_dir = Path(raw_dir)
     opt = options or Options()
 
-    # 1) базовый список пилотов
+                               
     if roster is not None:
         drivers = [str(x) for x in roster]
     else:
@@ -276,12 +276,12 @@ def _featurize_impl(
         drivers = cur["Driver"].astype(str).tolist() if not cur.empty else []
 
     if not drivers:
-        # Нечего возвращать
+                           
         return pd.DataFrame()
 
     base = pd.DataFrame({"Driver": drivers})
 
-    # 2) прошлые этапы и сбор истории
+                                     
     past = _list_past(races_df, raw_dir, year, rnd, max_lookback=opt.max_lookback)
     rows = []
     for (y, r) in past:
@@ -290,13 +290,13 @@ def _featurize_impl(
             rows.append(t)
     hist = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["Driver"])
 
-    # 3) агрегации и join
+                         
     if not hist.empty:
         agg = _agg_quali(hist)
         out = base.merge(agg, on="Driver", how="left")
     else:
         out = base
-        # аккуратные дефолты при отсутствии истории
+                                                   
         out["quali_pre_hist_n"] = 0
         for c in ("quali_pre_pos_p50","quali_pre_pos_iqr","quali_pre_top10_rate",
                   "quali_pre_notime_or_pen_rate","quali_pre_points_mean"):
@@ -307,7 +307,7 @@ def _featurize_impl(
 
     return out
 
-# -------------------- публичный API --------------------
+                                                         
 
 def featurize(*args, **kwargs) -> pd.DataFrame:
     """
@@ -315,7 +315,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
       - featurize(ctx): ctx должен содержать raw_dir, year/season и rnd/round; опц.: races_df/races_csv, roster/drivers, max_lookback
       - featurize(raw_dir, races_df, year, rnd, roster=None, options=None)
     """
-    # ctx-режим
+               
     if len(args) == 1 and not kwargs and not isinstance(args[0], (str, Path)):
         ctx = args[0]
         get = (ctx.get if isinstance(ctx, dict) else lambda k, d=None: getattr(ctx, k, d))
@@ -351,7 +351,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
         max_lb = int(get("max_lookback", 30))
         return _featurize_impl(raw_dir, races_df, int(year), int(rnd), roster=roster, options=Options(max_lookback=max_lb))
 
-    # старая сигнатура
+                      
     if len(args) >= 4 and isinstance(args[0], (str, Path)):
         raw_dir, races_df, year, rnd = args[:4]
         roster = args[4] if len(args) >= 5 else kwargs.get("roster")
@@ -360,7 +360,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
 
     raise TypeError("quali_priors_pre.featurize: ожидается featurize(ctx) или featurize(raw_dir, races_df, year, rnd, ...).")
 
-# -------------------- CLI для отладки --------------------
+                                                           
 
 if __name__ == "__main__":
     import argparse

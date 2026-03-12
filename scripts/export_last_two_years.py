@@ -41,9 +41,9 @@ import numpy as np
 import fastf1
 
 
-# -----------------------------
-# IO helpers
-# -----------------------------
+                               
+            
+                               
 
 def setup_dirs(out_dir: Path, cache_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -74,20 +74,20 @@ def _add_race_id(df: pd.DataFrame, year: int, rnd: int) -> pd.DataFrame:
     return df
 
 
-# -----------------------------
-# Transform helpers
-# -----------------------------
+                               
+                   
+                               
 
 def laps_with_ms(laps: pd.DataFrame) -> pd.DataFrame:
     """Ensure a numeric 'milliseconds' column is present (from LapTime)."""
     df = laps.copy()
     if "milliseconds" not in df.columns:
         if "LapTime" in df.columns:
-            # LapTime is a pandas Timedelta; convert to float milliseconds
+                                                                          
             ms = pd.to_timedelta(df["LapTime"], errors="coerce").dt.total_seconds() * 1000.0
             df["milliseconds"] = ms.astype(float)
         else:
-            # try 'Time' (rare) or leave NaN
+                                            
             if "Time" in df.columns and pd.api.types.is_timedelta64_dtype(df["Time"]):
                 df["milliseconds"] = df["Time"].dt.total_seconds() * 1000.0
             else:
@@ -101,16 +101,16 @@ def derive_pitstops_from_laps(laps: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["raceId", "Driver", "DriverNumber", "lap", "duration_ms"])
     df = laps.copy()
     cols = set(df.columns)
-    # FastF1 Laps have LapNumber, PitInTime, PitOutTime
+                                                       
     if not {"LapNumber"}.issubset(cols):
         return pd.DataFrame(columns=["raceId", "Driver", "DriverNumber", "lap", "duration_ms"])
     df["lap"] = pd.to_numeric(df["LapNumber"], errors="coerce").astype("Int64")
     df = df.dropna(subset=["lap"]).astype({"lap": int})
-    # Detect pit entries where PitInTime is not null on this lap
+                                                                
     has_pitin = "PitInTime" in cols
     has_pitout = "PitOutTime" in cols
     if not has_pitin and not has_pitout:
-        # Some data only flags 'IsPitOut' on outlap; fallback: mark laps where 'PitOutTime' on this lap exists
+                                                                                                              
         return pd.DataFrame(columns=["raceId", "Driver", "DriverNumber", "lap", "duration_ms"])
     pit = df.loc[df["PitInTime"].notna()] if has_pitin else pd.DataFrame(columns=df.columns)
     if has_pitin and has_pitout:
@@ -137,7 +137,7 @@ def stints_from_laps(laps: pd.DataFrame) -> pd.DataFrame:
 def entrylist_from_session(session) -> pd.DataFrame:
     rows = []
     for drv in session.drivers:
-        info = session.get_driver(drv)  # dict with Abbreviation, DriverNumber, BroadcastName, TeamName, etc.
+        info = session.get_driver(drv)                                                                       
         rows.append({
             "raceId": int(session.event["EventDate"].year) * 1000 + int(session.event["RoundNumber"]),
             "DriverNumber": info.get("DriverNumber"),
@@ -153,10 +153,10 @@ def entrylist_from_session(session) -> pd.DataFrame:
 def schedule_for_year(year: int) -> pd.DataFrame:
     try:
         sched = fastf1.get_event_schedule(year)
-        # keep essential columns
+                                
         keep = [c for c in ["EventName", "OfficialEventName", "Location", "Country", "EventDate", "RoundNumber"] if c in sched.columns]
         df = sched[keep].copy().reset_index(drop=True)
-        # add synthetic raceId = year*1000 + round
+                                                  
         if "RoundNumber" in df.columns:
             df.insert(0, "raceId", [int(year) * 1000 + int(r) for r in df["RoundNumber"]])
         else:
@@ -189,9 +189,9 @@ def per_race_weather_summary(year: int, rnd: int, ses: str, weather_df: pd.DataF
     return out
 
 
-# -----------------------------
-# Export logic
-# -----------------------------
+                               
+              
+                               
 
 def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_stride: int, driver_limit: Optional[int]) -> Dict[str, object]:
     tag = f"{year} R{rnd:02d} {ses}"
@@ -200,7 +200,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         session = fastf1.get_session(year, rnd, ses)
         session.load(laps=True, telemetry=True, weather=True)
 
-        # Base dataframes
+                         
         laps = session.laps.reset_index(drop=True)
         laps = _add_race_id(laps, year, rnd)
         laps = laps_with_ms(laps)
@@ -211,7 +211,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         results = session.results.reset_index(drop=True)
         results = _add_race_id(results, year, rnd)
 
-        # meta
+              
         meta = {
             "raceId": int(year) * 1000 + int(rnd),
             "Year": year, "Round": rnd, "Session": ses,
@@ -222,14 +222,14 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         }
         meta_df = pd.DataFrame([meta])
 
-        # Save core CSVs
+                        
         suffix = "" if ses == "R" else f"_{ses}"
         safe_to_csv(laps, out_dir / f"laps_{year}_{rnd}{suffix}.csv")
         safe_to_csv(weather, out_dir / f"weather_{year}_{rnd}{suffix}.csv")
         safe_to_csv(results, out_dir / f"results_{year}_{rnd}{suffix}.csv")
         safe_to_csv(meta_df, out_dir / f"meta_{year}_{rnd}{suffix}.csv")
 
-        # Race-only extras
+                          
         if ses == "R":
             try:
                 rcm = session.race_control_messages.reset_index(drop=True)
@@ -244,14 +244,14 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             except Exception:
                 pass
 
-        # Entry list
+                    
         try:
             ent = entrylist_from_session(session)
             safe_to_csv(ent, out_dir / f"entrylist_{year}_{rnd}{suffix}.csv")
         except Exception:
             pass
 
-        # Stints (from laps)
+                            
         try:
             st = stints_from_laps(laps)
             if not st.empty:
@@ -259,7 +259,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         except Exception:
             pass
 
-        # Telemetry + Position per driver
+                                         
         drivers: List[int] = list(session.drivers)
         if driver_limit is not None:
             drivers = drivers[:driver_limit]
@@ -270,7 +270,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             info = session.get_driver(drv)
             abbr = info.get("Abbreviation", str(drv))
 
-            # car telemetry
+                           
             try:
                 car = session.laps.pick_driver(drv).get_car_data()
                 if car is not None and len(car):
@@ -283,7 +283,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             except Exception:
                 pass
 
-            # position XY
+                         
             try:
                 pos = session.laps.pick_driver(drv).get_pos_data()
                 if pos is not None and len(pos):
@@ -294,7 +294,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             except Exception:
                 pass
 
-        # Derived pit stops (R only — most useful for race strategy features)
+                                                                             
         pit_cnt = 0
         if ses == "R":
             try:
@@ -305,7 +305,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             except Exception:
                 pass
 
-        # Return a compact summary for logging
+                                              
         return {"race": tag, "status": "ok", "drivers_tel": tel_cnt, "drivers_pos": pos_cnt, "pit_rows": pit_cnt, "secs": time.time() - t0}
 
     except Exception as e:
@@ -317,7 +317,7 @@ def get_max_round(year: int) -> int:
         sched = fastf1.get_event_schedule(year)
         return int(sched["RoundNumber"].max())
     except Exception:
-        # reasonable upper bound
+                                
         return 25
 
 
@@ -329,7 +329,7 @@ def export_season(year: int, sessions: Iterable[str], out_dir: Path, telemetry_s
         for rnd in range(1, rounds + 1):
             for ses in sessions:
                 if skip_existing:
-                    # quick check: if laps file exists, skip this session
+                                                                         
                     suffix = "" if ses == "R" else f"_{ses}"
                     if (out_dir / f"laps_{year}_{rnd}{suffix}.csv").exists():
                         continue
@@ -358,7 +358,7 @@ def aggregate_weather(out_dir: Path, years: Iterable[int], sessions: Iterable[st
                     pass
     if rows:
         df = pd.DataFrame(rows)
-        # keep one row per raceId preferring Race over other sessions
+                                                                     
         df["_pref"] = df["session"].apply(lambda s: 0 if s == "R" else 1)
         df = df.sort_values(["raceId", "_pref"]).drop_duplicates("raceId").drop(columns=["_pref","session"])
         safe_to_csv(df, out_dir / "weather.csv")
@@ -373,12 +373,12 @@ def export_schedule(years: Iterable[int], out_dir: Path):
             safe_to_csv(sc, out_dir / f"schedule_{y}.csv")
     if all_rows:
         df = pd.concat(all_rows, ignore_index=True)
-        safe_to_csv(df, out_dir / "races.csv")  # lightweight schedule (year, round, raceId, names)
+        safe_to_csv(df, out_dir / "races.csv")                                                     
 
 
-# -----------------------------
-# CLI
-# -----------------------------
+                               
+     
+                               
 
 def main():
     ap = argparse.ArgumentParser(description="Export FastF1 datasets for pre-race features.")
@@ -393,13 +393,13 @@ def main():
     ap.add_argument("--skip-existing", action="store_true", help="Skip sessions that already have laps CSV.")
     args = ap.parse_args()
 
-    # Resolve years
+                   
     if args.years:
         years = sorted(set(args.years))
     else:
         from datetime import date
         cur = date.today().year
-        # last N seasons including current
+                                          
         years = list(range(cur - args.last_n_seasons + 1, cur + 1))
 
     setup_dirs(args.out_dir, args.cache_dir)
@@ -417,7 +417,7 @@ def main():
             skip_existing=args.skip_existing,
         )
 
-    # Aggregates
+                
     export_schedule(years, args.out_dir)
     aggregate_weather(args.out_dir, years, args.sessions)
 
