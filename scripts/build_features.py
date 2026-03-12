@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
                                   
-from src.features import FEATURIZERS, TARGETIZERS
+from src.features import ALL_FEATURIZERS, FEATURIZERS, TARGETIZERS
 from src.frame_utils import sanitize_frame_columns
 
 import warnings
@@ -51,9 +51,44 @@ warnings.filterwarnings(
          
                                                               
 
-def log(msg: str, *, quiet: bool = False) -> None:
+def log(msg: str, *, quiet: bool = False, use_tqdm: bool = False) -> None:
     if not quiet:
-        print(msg, flush=True)
+        if use_tqdm:
+            tqdm.write(msg)
+        else:
+            print(msg, flush=True)
+
+
+def _concat_saved_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    usable = [df for df in frames if df is not None and not df.empty]
+    if not usable:
+        return pd.DataFrame()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.",
+            category=FutureWarning,
+        )
+        return pd.concat(usable, ignore_index=True, sort=False)
+
+
+def _make_bar(
+    *,
+    total: int,
+    desc: str,
+    unit: str,
+    leave: bool,
+    position: int,
+) -> tqdm:
+    return tqdm(
+        total=total,
+        desc=desc,
+        unit=unit,
+        leave=leave,
+        position=position,
+        dynamic_ncols=True,
+        smoothing=0.1,
+    )
 
 
 def parse_year_round(name: str) -> Tuple[int, int]:
@@ -107,6 +142,29 @@ def safe_to_parquet_or_csv(df: pd.DataFrame, path: Path, *, also_csv: bool = Fal
     df.to_parquet(path, index=False)
     if also_csv:
         df.to_csv(path.with_suffix(".csv"), index=False)
+
+
+def collect_saved_race_frames(
+    out_dir: Path,
+    prefix: str,
+    *,
+    skip_tags: Optional[set[str]] = None,
+) -> List[pd.DataFrame]:
+    frames: List[pd.DataFrame] = []
+    for path in sorted(out_dir.glob(f"{prefix}_*.parquet")):
+        try:
+            year, rnd = parse_year_round(path.name)
+        except Exception:
+            continue
+        tag = f"{year}_{rnd}"
+        if skip_tags and tag in skip_tags:
+            continue
+        df = pd.read_parquet(path)
+        df = df.copy()
+        df["year"] = int(year)
+        df["round"] = int(rnd)
+        frames.append(df)
+    return frames
 
 
 def _coalesce_overlap(left: pd.Series, right: pd.Series, name: str) -> pd.Series:
@@ -169,44 +227,86 @@ def run_modules(
     merge_how: str = "outer",
     verbose: bool = False,
     progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> pd.DataFrame:
     """Execute selected modules and merge on 'Driver'. Optionally dump intermediates.
     Returns merged DataFrame (may be empty).
     """
     to_run = [(n, f) for (n, f) in module_specs if (select is None or n in select)]
     frames: List[pd.DataFrame] = []
+    ok_count = 0
+    empty_count = 0
+    err_count = 0
 
-    mod_iter = to_run
+    bar = None
     if progress and not verbose:
-        mod_iter = tqdm(to_run, desc="Modules", unit="feat", leave=False)
+        bar = _make_bar(
+            total=len(to_run),
+            desc=progress_desc or "Modules",
+            unit="module",
+            leave=False,
+            position=1,
+        )
 
-    for name, fn in mod_iter:
+    for name, fn in to_run:
+        if bar is not None:
+            bar.set_postfix_str(f"module={name} ok={ok_count} empty={empty_count} err={err_count}")
         try:
             part = fn(ctx)
         except Exception as e:
+            err_count += 1
+            if bar is not None:
+                bar.update(1)
             if strict_empty:
+                if bar is not None:
+                    bar.close()
                 raise
-            log(f"  - {name}: EXCEPTION {e}", quiet=not verbose)
+            log(
+                f"{progress_desc or 'modules'} | {name}: EXCEPTION {e}",
+                quiet=not verbose and not progress,
+                use_tqdm=(progress and not verbose),
+            )
             continue
         if part is None or part.empty:
             msg = f"  - {name}: empty"
+            empty_count += 1
+            if bar is not None:
+                bar.update(1)
             if strict_empty:
+                if bar is not None:
+                    bar.close()
                 raise RuntimeError(msg)
             log(msg, quiet=not verbose)
             continue
         try:
             part = _validate_frame(name, part)
         except Exception as e:
+            err_count += 1
+            if bar is not None:
+                bar.update(1)
             if strict_empty:
+                if bar is not None:
+                    bar.close()
                 raise
-            log(f"  - {name}: EXCEPTION {e}", quiet=not verbose)
+            log(
+                f"{progress_desc or 'modules'} | {name}: EXCEPTION {e}",
+                quiet=not verbose and not progress,
+                use_tqdm=(progress and not verbose),
+            )
             continue
               
         if dump_dir is not None:
             dump_dir.mkdir(parents=True, exist_ok=True)
             safe_to_parquet_or_csv(part, dump_dir / f"{name}.parquet", also_csv=True)
         frames.append(part)
+        ok_count += 1
+        if bar is not None:
+            bar.update(1)
         log(f"  - {name}: ok ({part.shape[0]}x{part.shape[1]})", quiet=not verbose)
+
+    if bar is not None:
+        bar.set_postfix_str(f"ok={ok_count} empty={empty_count} err={err_count} merge")
+        bar.close()
 
     if not frames:
         return pd.DataFrame()
@@ -235,6 +335,11 @@ def main() -> None:
     ap.add_argument("--merge-how", type=str, default="outer", choices=["outer", "inner"], help="Merge strategy")
     ap.add_argument("--strict-empty", action="store_true", help="Treat empty module as an error")
     ap.add_argument("--progress", action="store_true", help="Show progress bars for races/modules")
+    ap.add_argument(
+        "--recombine-existing",
+        action="store_true",
+        help="When writing all_features/all_targets, include already saved per-race files from --out-dir",
+    )
 
     args = ap.parse_args()
 
@@ -257,19 +362,39 @@ def main() -> None:
 
     all_feat: List[pd.DataFrame] = []
     all_tgt: List[pd.DataFrame] = []
+    built_tags: set[str] = set()
+    built_count = 0
+    skipped_count = 0
+    empty_count = 0
 
-    race_iter = races
+    race_bar = None
     if args.progress and not args.verbose:
-        race_iter = tqdm(races, desc="Races", unit="race")
+        race_bar = _make_bar(
+            total=len(races),
+            desc="Races",
+            unit="race",
+            leave=True,
+            position=0,
+        )
 
-    for (year, rnd) in race_iter:
+    for (year, rnd) in races:
         tag = f"{year}_{rnd}"
+        if race_bar is not None:
+            race_bar.set_description(f"Race {tag}")
+            race_bar.set_postfix_str(f"built={built_count} skipped={skipped_count} empty={empty_count}")
         feat_path = out_dir / f"features_{tag}.parquet"
         if args.skip_existing and feat_path.exists():
-            log(f"[skip] {tag} features already exist at {feat_path}")
+            skipped_count += 1
+            log(
+                f"[skip] {tag} features already exist at {feat_path}",
+                quiet=(args.progress and not args.verbose),
+                use_tqdm=(args.progress and not args.verbose),
+            )
+            if race_bar is not None:
+                race_bar.update(1)
             continue
 
-        log(f"\n=== Build {tag} ===")
+        log(f"\n=== Build {tag} ===", quiet=(args.progress and not args.verbose))
                                               
         dump_dir = (out_dir / "tmp" / tag) if args.dump_intermediate else None
 
@@ -281,25 +406,37 @@ def main() -> None:
             try:
                 ctx.update(json.loads(args.ctx_json))
             except Exception as e:
-                log(f"  ! bad --ctx-json: {e}")
+                log(
+                    f"  ! bad --ctx-json: {e}",
+                    use_tqdm=(args.progress and not args.verbose),
+                )
 
                              
         feat_df = run_modules(
             ctx,
-            FEATURIZERS,
+            ALL_FEATURIZERS if selected_modules is not None else FEATURIZERS,
             select=selected_modules,
             dump_dir=dump_dir,
             strict_empty=args.strict_empty,
             merge_how=args.merge_how,
             verbose=args.verbose,
             progress=(args.progress and not args.verbose),
+            progress_desc=f"{tag} features",
         )
         if feat_df is None or feat_df.empty:
-            log("  ! no features produced (empty result)")
+            empty_count += 1
+            log(
+                f"{tag} | no features produced (empty result)",
+                use_tqdm=(args.progress and not args.verbose),
+            )
+            if race_bar is not None:
+                race_bar.update(1)
             continue
 
                           
         if args.with_targets:
+            if race_bar is not None:
+                race_bar.set_postfix_str(f"built={built_count} skipped={skipped_count} empty={empty_count} stage=targets")
             tgt_df = run_modules(
                 ctx,
                 TARGETIZERS,
@@ -309,6 +446,7 @@ def main() -> None:
                 merge_how="outer",
                 verbose=args.verbose,
                 progress=(args.progress and not args.verbose),
+                progress_desc=f"{tag} targets",
             )
             if tgt_df is not None and not tgt_df.empty:
                 tgt_df = _validate_frame("targets", tgt_df)
@@ -318,16 +456,34 @@ def main() -> None:
                        
         safe_to_parquet_or_csv(feat_df, feat_path, also_csv=args.also_csv)
         all_feat.append(feat_df.assign(year=year, round=rnd))
+        built_tags.add(tag)
+        built_count += 1
+        if race_bar is not None:
+            race_bar.set_postfix_str(
+                f"built={built_count} skipped={skipped_count} empty={empty_count} rows={len(feat_df)}"
+            )
+            race_bar.update(1)
 
-                       
-    if all_feat:
-        full_feat = pd.concat(all_feat, ignore_index=True, sort=False)
+    if race_bar is not None:
+        race_bar.set_description("Races done")
+        race_bar.set_postfix_str(f"built={built_count} skipped={skipped_count} empty={empty_count}")
+        race_bar.close()
+
+    feat_frames = list(all_feat)
+    if args.recombine_existing:
+        feat_frames = collect_saved_race_frames(out_dir, "features", skip_tags=built_tags) + feat_frames
+    if feat_frames:
+        full_feat = _concat_saved_frames(feat_frames)
         safe_to_parquet_or_csv(full_feat, out_dir / "all_features.parquet", also_csv=args.also_csv)
-        log(f"\nSaved {len(all_feat)} race files and all_features.parquet")
-    if all_tgt and args.with_targets:
-        full_tgt = pd.concat(all_tgt, ignore_index=True, sort=False)
+        log(f"\nSaved {len(feat_frames)} race feature frames into all_features.parquet")
+
+    tgt_frames = list(all_tgt)
+    if args.recombine_existing and args.with_targets:
+        tgt_frames = collect_saved_race_frames(out_dir, "targets", skip_tags=built_tags) + tgt_frames
+    if tgt_frames and args.with_targets:
+        full_tgt = _concat_saved_frames(tgt_frames)
         safe_to_parquet_or_csv(full_tgt, out_dir / "all_targets.parquet", also_csv=args.also_csv)
-        log(f"Saved {len(all_tgt)} target files and all_targets.parquet")
+        log(f"Saved {len(tgt_frames)} target frames into all_targets.parquet")
 
 
 if __name__ == "__main__":

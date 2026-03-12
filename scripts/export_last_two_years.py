@@ -31,8 +31,10 @@ Usage examples:
 """
 
 import argparse
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Iterable, Dict, List, Tuple
 
@@ -153,8 +155,35 @@ def entrylist_from_session(session) -> pd.DataFrame:
 def schedule_for_year(year: int) -> pd.DataFrame:
     try:
         sched = fastf1.get_event_schedule(year)
-                                
-        keep = [c for c in ["EventName", "OfficialEventName", "Location", "Country", "EventDate", "RoundNumber"] if c in sched.columns]
+        keep = [
+            c
+            for c in [
+                "EventName",
+                "OfficialEventName",
+                "Location",
+                "Country",
+                "EventDate",
+                "EventFormat",
+                "F1ApiSupport",
+                "RoundNumber",
+                "Session1",
+                "Session1Date",
+                "Session1DateUtc",
+                "Session2",
+                "Session2Date",
+                "Session2DateUtc",
+                "Session3",
+                "Session3Date",
+                "Session3DateUtc",
+                "Session4",
+                "Session4Date",
+                "Session4DateUtc",
+                "Session5",
+                "Session5Date",
+                "Session5DateUtc",
+            ]
+            if c in sched.columns
+        ]
         df = sched[keep].copy().reset_index(drop=True)
                                                   
         if "RoundNumber" in df.columns:
@@ -166,6 +195,113 @@ def schedule_for_year(year: int) -> pd.DataFrame:
         return df
     except Exception as e:
         return pd.DataFrame()
+
+
+_SESSION_ALIASES: Dict[str, set[str]] = {
+    "FP1": {"FP1", "Practice 1"},
+    "FP2": {"FP2", "Practice 2"},
+    "FP3": {"FP3", "Practice 3"},
+    "Q": {"Q", "Qualifying"},
+    "R": {"R", "Race"},
+    "S": {"S", "Sprint"},
+    "SQ": {"SQ", "Sprint Qualifying"},
+    "SS": {"SS", "Sprint Shootout"},
+}
+
+
+def _utc_naive(ts_like) -> pd.Timestamp:
+    try:
+        ts = pd.Timestamp(ts_like)
+    except Exception:
+        return pd.NaT
+    if pd.isna(ts):
+        return pd.NaT
+    if ts.tzinfo is not None:
+        return ts.tz_convert("UTC").tz_localize(None)
+    return ts
+
+
+def _session_date_from_schedule_row(row: pd.Series, session_code: str) -> pd.Timestamp:
+    want = str(session_code).upper()
+    aliases = _SESSION_ALIASES.get(want, {want})
+    for idx in range(1, 6):
+        name = str(row.get(f"Session{idx}", "")).strip()
+        if not name:
+            continue
+        if name in aliases or name.upper() == want:
+            for col in (f"Session{idx}DateUtc", f"Session{idx}Date"):
+                if col in row.index:
+                    ts = _utc_naive(row.get(col))
+                    if pd.notna(ts):
+                        return ts
+    if want == "R":
+        return _utc_naive(row.get("EventDate"))
+    return pd.NaT
+
+
+def resolve_rounds_from_schedule(
+    schedule: pd.DataFrame,
+    sessions: Iterable[str],
+    *,
+    completed_only: bool = False,
+    latest_only: bool = False,
+    lookback_rounds: Optional[int] = None,
+    now_utc: Optional[pd.Timestamp] = None,
+) -> List[int]:
+    if schedule is None or schedule.empty:
+        return []
+
+    now = _utc_naive(now_utc or datetime.now(timezone.utc))
+    round_col = "RoundNumber" if "RoundNumber" in schedule.columns else "round"
+    if round_col not in schedule.columns:
+        return []
+
+    rounds: List[int] = []
+    sessions = [str(s).upper() for s in sessions]
+    work = schedule.copy()
+    work[round_col] = pd.to_numeric(work[round_col], errors="coerce")
+    work = work[work[round_col] > 0].sort_values(round_col)
+
+    for _, row in work.iterrows():
+        rnd = int(row[round_col])
+        if not completed_only:
+            rounds.append(rnd)
+            continue
+        session_dates = [_session_date_from_schedule_row(row, ses) for ses in sessions]
+        session_dates = [ts for ts in session_dates if pd.notna(ts)]
+        if not session_dates:
+            event_ts = _utc_naive(row.get("EventDate"))
+            if pd.notna(event_ts) and event_ts <= now:
+                rounds.append(rnd)
+            continue
+        if all(ts <= now for ts in session_dates):
+            rounds.append(rnd)
+
+    if lookback_rounds is not None and lookback_rounds > 0:
+        rounds = rounds[-int(lookback_rounds):]
+    if latest_only and rounds:
+        rounds = [rounds[-1]]
+    return rounds
+
+
+def completed_rounds_for_year(
+    year: int,
+    sessions: Iterable[str],
+    *,
+    latest_only: bool = False,
+    lookback_rounds: Optional[int] = None,
+) -> List[int]:
+    try:
+        sched = fastf1.get_event_schedule(year)
+    except Exception:
+        return []
+    return resolve_rounds_from_schedule(
+        sched,
+        sessions,
+        completed_only=True,
+        latest_only=latest_only,
+        lookback_rounds=lookback_rounds,
+    )
 
 
 def per_race_weather_summary(year: int, rnd: int, ses: str, weather_df: pd.DataFrame) -> Dict[str, float]:
@@ -187,6 +323,19 @@ def per_race_weather_summary(year: int, rnd: int, ses: str, weather_df: pd.DataF
         else:
             out[new] = np.nan
     return out
+
+
+def _is_unavailable_session_error(exc: Exception) -> bool:
+    msg = str(exc).strip().lower()
+    patterns = (
+        "invalid session",
+        "session does not exist",
+        "session is not part of this event",
+        "event does not have",
+        "no session",
+        "unknown session",
+    )
+    return any(p in msg for p in patterns)
 
 
                                
@@ -224,9 +373,17 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             "raceId": int(year) * 1000 + int(rnd),
             "Year": year, "Round": rnd, "Session": ses,
             "EventName": session.event.get("EventName", ""),
+            "OfficialEventName": session.event.get("OfficialEventName", ""),
             "Location": session.event.get("Location", ""),
             "Country": session.event.get("Country", ""),
             "EventDate": str(session.event.get("EventDate", "")),
+            "EventFormat": session.event.get("EventFormat", ""),
+            "F1ApiSupport": bool(getattr(session, "f1_api_support", False)),
+            "SessionName": getattr(session, "name", ses),
+            "SessionDate": str(getattr(session, "date", "")),
+            "SessionStartTime": str(getattr(session, "session_start_time", "")),
+            "T0Date": str(getattr(session, "t0_date", "")),
+            "ApiPath": getattr(session, "api_path", ""),
         }
         meta_df = pd.DataFrame([meta])
 
@@ -236,6 +393,26 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         safe_to_csv(weather, out_dir / f"weather_{year}_{rnd}{suffix}.csv")
         safe_to_csv(results, out_dir / f"results_{year}_{rnd}{suffix}.csv")
         safe_to_csv(meta_df, out_dir / f"meta_{year}_{rnd}{suffix}.csv")
+
+        def _save_session_info() -> None:
+            info = getattr(session, "session_info", None)
+            if info is None:
+                return
+            if isinstance(info, dict):
+                sdf = pd.DataFrame([info])
+            else:
+                sdf = pd.DataFrame([dict(info)])
+            if not sdf.empty:
+                sdf = _add_race_id(sdf, year, rnd)
+                safe_to_csv(sdf, out_dir / f"session_info_{year}_{rnd}{suffix}.csv")
+        _capture_optional("session_info", _save_session_info)
+
+        def _save_session_status() -> None:
+            ss = session.session_status.reset_index(drop=True)
+            if not ss.empty:
+                ss = _add_race_id(ss, year, rnd)
+                safe_to_csv(ss, out_dir / f"session_status_{year}_{rnd}{suffix}.csv")
+        _capture_optional("session_status", _save_session_status)
 
                           
         if ses == "R":
@@ -309,6 +486,9 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         status = "ok" if not warnings_list else f"ok_with_warnings:{len(warnings_list)}"
         return {
             "race": tag,
+            "year": int(year),
+            "round": int(rnd),
+            "session": str(ses),
             "status": status,
             "drivers_tel": tel_cnt,
             "drivers_pos": pos_cnt,
@@ -319,8 +499,25 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
         }
 
     except Exception as e:
+        if _is_unavailable_session_error(e):
+            return {
+                "race": tag,
+                "year": int(year),
+                "round": int(rnd),
+                "session": str(ses),
+                "status": "skipped_unavailable_session",
+                "drivers_tel": 0,
+                "drivers_pos": 0,
+                "pit_rows": 0,
+                "warning_count": 0,
+                "warnings": [],
+                "secs": time.time() - t0,
+            }
         return {
             "race": tag,
+            "year": int(year),
+            "round": int(rnd),
+            "session": str(ses),
             "status": f"error: {e}",
             "drivers_tel": 0,
             "drivers_pos": 0,
@@ -340,12 +537,23 @@ def get_max_round(year: int) -> int:
         return 25
 
 
-def export_season(year: int, sessions: Iterable[str], out_dir: Path, telemetry_stride: int, max_workers: int, driver_limit: Optional[int], skip_existing: bool) -> List[Dict[str, object]]:
-    rounds = get_max_round(year)
+def export_season(
+    year: int,
+    sessions: Iterable[str],
+    out_dir: Path,
+    telemetry_stride: int,
+    max_workers: int,
+    driver_limit: Optional[int],
+    skip_existing: bool,
+    rounds: Optional[Iterable[int]] = None,
+) -> List[Dict[str, object]]:
+    round_list = sorted(set(int(r) for r in rounds)) if rounds is not None else list(range(1, get_max_round(year) + 1))
+    if not round_list:
+        return []
     tasks = []
     logs = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for rnd in range(1, rounds + 1):
+        for rnd in round_list:
             for ses in sessions:
                 if skip_existing:
                                                                          
@@ -358,6 +566,72 @@ def export_season(year: int, sessions: Iterable[str], out_dir: Path, telemetry_s
             logs.append(res)
             warn_tail = f", warn:{res.get('warning_count', 0)}" if res.get("warning_count", 0) else ""
             print(f"• {res['race']}: {res['status']} (tel:{res['drivers_tel']}, pos:{res['drivers_pos']}, pit:{res['pit_rows']}{warn_tail}, {res['secs']:.1f}s)")
+    return logs
+
+
+def run_export(
+    *,
+    out_dir: Path,
+    cache_dir: Path,
+    years: Iterable[int],
+    sessions: Iterable[str],
+    telemetry_stride: int,
+    max_workers: int,
+    driver_limit: Optional[int],
+    skip_existing: bool,
+    completed_only: bool,
+    latest_only: bool,
+    lookback_rounds: Optional[int],
+) -> List[Dict[str, object]]:
+    years = sorted(set(int(y) for y in years))
+    sessions = [str(s).upper() for s in sessions]
+    setup_dirs(out_dir, cache_dir)
+
+    logs: List[Dict[str, object]] = []
+    print(f"== Exporting years: {', '.join(map(str, years))} ==")
+    for y in years:
+        rounds = None
+        if completed_only or latest_only or lookback_rounds:
+            rounds = completed_rounds_for_year(
+                y,
+                sessions,
+                latest_only=latest_only,
+                lookback_rounds=lookback_rounds,
+            )
+        print(f"\n=== Season {y} ===")
+        if rounds is not None:
+            if rounds:
+                print(f"Planned rounds: {', '.join(map(str, rounds))}")
+            else:
+                print("No completed rounds match the requested filter.")
+                continue
+        logs.extend(
+            export_season(
+                year=y,
+                sessions=sessions,
+                out_dir=out_dir,
+                telemetry_stride=telemetry_stride,
+                max_workers=max_workers,
+                driver_limit=driver_limit,
+                skip_existing=skip_existing,
+                rounds=rounds,
+            )
+        )
+
+    export_schedule(years, out_dir)
+    aggregate_weather(out_dir, years, sessions)
+
+    manifest = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "fastf1_version": getattr(fastf1, "__version__", ""),
+        "years": years,
+        "sessions": sessions,
+        "completed_only": bool(completed_only),
+        "latest_only": bool(latest_only),
+        "lookback_rounds": int(lookback_rounds) if lookback_rounds else None,
+        "results": logs,
+    }
+    (out_dir / "export_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return logs
 
 
@@ -411,6 +685,9 @@ def main():
     ap.add_argument("--max-workers", type=int, default=4, help="Parallel workers.")
     ap.add_argument("--driver-limit", type=int, default=None, help="Limit number of drivers per session (debug).")
     ap.add_argument("--skip-existing", action="store_true", help="Skip sessions that already have laps CSV.")
+    ap.add_argument("--completed-only", action="store_true", help="Export only rounds whose requested sessions are already completed.")
+    ap.add_argument("--latest-only", action="store_true", help="Export only the latest completed round per requested year.")
+    ap.add_argument("--lookback-rounds", type=int, default=None, help="Restrict export to the last N completed rounds per year.")
     args = ap.parse_args()
 
                    
@@ -422,24 +699,19 @@ def main():
                                           
         years = list(range(cur - args.last_n_seasons + 1, cur + 1))
 
-    setup_dirs(args.out_dir, args.cache_dir)
-
-    print(f"== Exporting years: {', '.join(map(str, years))} ==")
-    for y in years:
-        print(f"\n=== Season {y} ===")
-        export_season(
-            year=y,
-            sessions=args.sessions,
-            out_dir=args.out_dir,
-            telemetry_stride=args.telemetry_stride,
-            max_workers=args.max_workers,
-            driver_limit=args.driver_limit,
-            skip_existing=args.skip_existing,
-        )
-
-                
-    export_schedule(years, args.out_dir)
-    aggregate_weather(args.out_dir, years, args.sessions)
+    run_export(
+        out_dir=args.out_dir,
+        cache_dir=args.cache_dir,
+        years=years,
+        sessions=args.sessions,
+        telemetry_stride=args.telemetry_stride,
+        max_workers=args.max_workers,
+        driver_limit=args.driver_limit,
+        skip_existing=args.skip_existing,
+        completed_only=args.completed_only or args.latest_only or bool(args.lookback_rounds),
+        latest_only=args.latest_only,
+        lookback_rounds=args.lookback_rounds,
+    )
 
     print("\n✅ Done. Files saved in", args.out_dir)
     print("   Next: run scripts.build_features with --raw-dir pointing to this folder.")
