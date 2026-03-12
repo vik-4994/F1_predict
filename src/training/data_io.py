@@ -6,6 +6,8 @@ from typing import List, Tuple
 import pandas as pd
 import numpy as np
 
+from .featureset import sanitize_frame_columns
+
 
 KEY = ["Driver", "year", "round"]
 
@@ -24,8 +26,8 @@ def _read_table(path: Path) -> pd.DataFrame:
 
 def load_all(features_path: Path, targets_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load features and targets tables."""
-    F = _read_table(features_path)
-    T = _read_table(targets_path)
+    F = sanitize_frame_columns(_read_table(features_path))
+    T = sanitize_frame_columns(_read_table(targets_path))
                     
     for df in (F, T):
         if "Driver" in df.columns:

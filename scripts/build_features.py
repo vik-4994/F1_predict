@@ -23,14 +23,21 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from tqdm.auto import tqdm
 
+import numpy as np
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
                                   
 from src.features import FEATURIZERS, TARGETIZERS
+from src.frame_utils import sanitize_frame_columns
 
 import warnings
 warnings.filterwarnings(
@@ -102,6 +109,56 @@ def safe_to_parquet_or_csv(df: pd.DataFrame, path: Path, *, also_csv: bool = Fal
         df.to_csv(path.with_suffix(".csv"), index=False)
 
 
+def _coalesce_overlap(left: pd.Series, right: pd.Series, name: str) -> pd.Series:
+    mask = left.notna() & right.notna()
+    if bool(mask.any()):
+        if pd.api.types.is_numeric_dtype(left) and pd.api.types.is_numeric_dtype(right):
+            compatible = np.allclose(
+                pd.to_numeric(left[mask], errors="coerce").to_numpy(dtype=float, copy=False),
+                pd.to_numeric(right[mask], errors="coerce").to_numpy(dtype=float, copy=False),
+                equal_nan=True,
+                rtol=1e-6,
+                atol=1e-8,
+            )
+        else:
+            compatible = bool((left[mask].astype(str) == right[mask].astype(str)).all())
+        if not compatible:
+            raise RuntimeError(f"Conflicting feature column '{name}' across modules")
+
+    out = left.copy()
+    fill_mask = out.isna() & right.notna()
+    if bool(fill_mask.any()):
+        out.loc[fill_mask] = right.loc[fill_mask]
+    return out
+
+
+def _validate_frame(name: str, part: pd.DataFrame) -> pd.DataFrame:
+    part = sanitize_frame_columns(part)
+    if "Driver" not in part.columns:
+        raise RuntimeError(f"{name}: missing 'Driver' column")
+    if part["Driver"].isna().any():
+        raise RuntimeError(f"{name}: null Driver values are not allowed")
+    if part["Driver"].astype(str).duplicated().any():
+        raise RuntimeError(f"{name}: duplicate Driver rows are not allowed")
+    return part
+
+
+def _merge_parts(left: pd.DataFrame, right: pd.DataFrame, how: str) -> pd.DataFrame:
+    overlap = [c for c in right.columns if c != "Driver" and c in left.columns]
+    merged = left.merge(
+        right,
+        on="Driver",
+        how=how,
+        validate="one_to_one",
+        suffixes=("", "__dup"),
+    )
+    for col in overlap:
+        dup_col = f"{col}__dup"
+        merged[col] = _coalesce_overlap(merged[col], merged[dup_col], col)
+        merged = merged.drop(columns=[dup_col])
+    return sanitize_frame_columns(merged)
+
+
 def run_modules(
     ctx: Dict,
     module_specs: List[Tuple[str, callable]],
@@ -137,12 +194,12 @@ def run_modules(
                 raise RuntimeError(msg)
             log(msg, quiet=not verbose)
             continue
-                                 
-        if "Driver" not in part.columns:
-            msg = f"  - {name}: missing 'Driver' column"
+        try:
+            part = _validate_frame(name, part)
+        except Exception as e:
             if strict_empty:
-                raise RuntimeError(msg)
-            log(msg, quiet=not verbose)
+                raise
+            log(f"  - {name}: EXCEPTION {e}", quiet=not verbose)
             continue
               
         if dump_dir is not None:
@@ -155,7 +212,7 @@ def run_modules(
         return pd.DataFrame()
     out = frames[0]
     for df in frames[1:]:
-        out = out.merge(df, on="Driver", how=merge_how)
+        out = _merge_parts(out, df, merge_how)
     return out
 
 
@@ -168,7 +225,7 @@ def main() -> None:
     ap.add_argument("--raw-dir", required=True, help="Directory with raw CSVs (races.csv, results.csv, etc.)")
     ap.add_argument("--out-dir", default="out", help="Output directory (default: ./out)")
     ap.add_argument("--modules", default=None, help="Comma-separated subset of module names to run (from FEATURIZERS)")
-    ap.add_argument("--with-targets", action="store_true", help="Also build and merge targets from TARGETIZERS")
+    ap.add_argument("--with-targets", action="store_true", help="Also build and save standalone targets from TARGETIZERS")
     ap.add_argument("--races", default=None, help="Comma-separated list of tags YYYY_R to build only these races")
     ap.add_argument("--skip-existing", action="store_true", help="Skip race if features_YYYY_R already exists")
     ap.add_argument("--also-csv", action="store_true", help="Save CSV alongside Parquet")
@@ -254,8 +311,7 @@ def main() -> None:
                 progress=(args.progress and not args.verbose),
             )
             if tgt_df is not None and not tgt_df.empty:
-                                                                      
-                feat_df = feat_df.merge(tgt_df, on="Driver", how="left")
+                tgt_df = _validate_frame("targets", tgt_df)
                 safe_to_parquet_or_csv(tgt_df, out_dir / f"targets_{tag}.parquet", also_csv=args.also_csv)
                 all_tgt.append(tgt_df.assign(year=year, round=rnd))
 

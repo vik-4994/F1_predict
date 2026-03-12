@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sys
 from typing import List, Sequence
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.frame_utils import filter_feature_cols
 
                                      
 from src.training import (
@@ -52,6 +59,19 @@ def make_mlp_ranker(in_dim: int, hidden: Sequence[int], dropout: float) -> nn.Mo
     return MLPScorer(in_dim=in_dim, hidden=hidden, dropout=dropout)
 
 
+def _apply_feature_ablation(feature_cols: List[str], cfg: TrainConfig) -> tuple[List[str], List[str]]:
+    kept, dropped = filter_feature_cols(
+        feature_cols,
+        drop_prefixes=cfg.drop_prefixes or [],
+        drop_contains=cfg.drop_contains or [],
+        drop_exact=cfg.drop_cols or [],
+        keep_prefixes=cfg.keep_prefixes or [],
+    )
+    if not kept:
+        raise ValueError("Feature ablation removed all feature columns")
+    return kept, dropped
+
+
                                                                                         
                       
                                                                                         
@@ -78,6 +98,17 @@ def main() -> None:
 
                                             
     feature_cols = select_feature_cols(TR)
+    feature_cols, dropped_cols = _apply_feature_ablation(feature_cols, cfg)
+    if dropped_cols:
+        preview = ", ".join(dropped_cols[:12])
+        if len(dropped_cols) > 12:
+            preview += ", ..."
+        log(
+            f"Ablation: kept {len(feature_cols)} / {len(feature_cols) + len(dropped_cols)} features | "
+            f"dropped {len(dropped_cols)} [{preview}]"
+        )
+    elif any((cfg.drop_prefixes, cfg.drop_contains, cfg.drop_cols, cfg.keep_prefixes)):
+        log(f"Ablation: filters applied but no feature columns were dropped | kept {len(feature_cols)}")
     scaler = fit_scaler_on_df(TR, feature_cols)
 
     TR_scaled = transform_with_scaler_df(TR, feature_cols, scaler, as_array=False).astype("float32")
@@ -121,6 +152,11 @@ def main() -> None:
                     "in_dim": len(feature_cols),
                     "best_epoch": epoch,
                     "val_mean": val["mean"],
+                    "drop_prefixes": cfg.drop_prefixes or [],
+                    "drop_contains": cfg.drop_contains or [],
+                    "drop_cols": cfg.drop_cols or [],
+                    "keep_prefixes": cfg.keep_prefixes or [],
+                    "dropped_feature_cols": dropped_cols,
                 }
                 save_checkpoint(
                     artifacts_dir=cfg.artifacts_dir(),

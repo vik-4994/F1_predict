@@ -1,12 +1,11 @@
                               
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import List, Optional
 import argparse
 import json
-import os
 import time
 
 
@@ -30,6 +29,23 @@ def _parse_hidden(s: str) -> List[int]:
     return out
 
 
+def _parse_csv_list(s: str) -> List[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    return [tok.strip() for tok in s.split(",") if tok.strip()]
+
+
+BASELINE_HIDDEN = [128, 64]
+BASELINE_DROPOUT = 0.25
+BASELINE_LR = 7e-4
+BASELINE_WEIGHT_DECAY = 3e-4
+BASELINE_EPOCHS = 16
+BASELINE_DROP_PREFIXES = ["pitcrew_", "slowstop_"]
+BASELINE_DROP_CONTAINS = ["double_stack", "undercut", "overcut"]
+BASELINE_DROP_COLS = ["expected_stop_count", "first_stint_len_exp"]
+
+
 @dataclass
 class TrainConfig:
                      
@@ -42,11 +58,11 @@ class TrainConfig:
     val_last: int = 6                                                                 
 
                             
-    epochs: int = 80
-    lr: float = 1e-3
-    weight_decay: float = 1e-4
-    hidden: List[int] = None                                                
-    dropout: float = 0.10
+    epochs: int = BASELINE_EPOCHS
+    lr: float = BASELINE_LR
+    weight_decay: float = BASELINE_WEIGHT_DECAY
+    hidden: List[int] = field(default_factory=lambda: list(BASELINE_HIDDEN))
+    dropout: float = BASELINE_DROPOUT
     seed: int = 42
 
                       
@@ -55,6 +71,10 @@ class TrainConfig:
                     
     log_every: int = 1                                                         
     dnf_position: int = 21                                                                     
+    drop_prefixes: List[str] = field(default_factory=lambda: list(BASELINE_DROP_PREFIXES))
+    drop_contains: List[str] = field(default_factory=lambda: list(BASELINE_DROP_CONTAINS))
+    drop_cols: List[str] = field(default_factory=lambda: list(BASELINE_DROP_COLS))
+    keep_prefixes: List[str] = field(default_factory=list)
 
     def artifacts_dir(self) -> Path:
         """models/<run_name> под out_dir."""
@@ -92,18 +112,26 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--val-last", type=int, default=6,
                     help="Сколько последних гонок использовать для валидации")
                   
-    ap.add_argument("--epochs", type=int, default=80)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--hidden", type=_parse_hidden, default=_parse_hidden("256,128"),
+    ap.add_argument("--epochs", type=int, default=BASELINE_EPOCHS)
+    ap.add_argument("--lr", type=float, default=BASELINE_LR)
+    ap.add_argument("--weight-decay", type=float, default=BASELINE_WEIGHT_DECAY)
+    ap.add_argument("--hidden", type=_parse_hidden, default=list(BASELINE_HIDDEN),
                     help='Скрытые слои MLP через запятую, напр. "512,256,128"')
-    ap.add_argument("--dropout", type=float, default=0.10)
+    ap.add_argument("--dropout", type=float, default=BASELINE_DROPOUT)
     ap.add_argument("--seed", type=int, default=42)
                    
     ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     ap.add_argument("--log-every", type=int, default=1, help="Частота логирования (в эпохах)")
     ap.add_argument("--dnf-position", type=int, default=21,
                     help="Эффективная позиция для DNF в тренировочном порядке")
+    ap.add_argument("--drop-prefixes", type=_parse_csv_list, default=list(BASELINE_DROP_PREFIXES),
+                    help='Исключить фичи по префиксам, напр. "tele_pre_,pitcrew_"')
+    ap.add_argument("--drop-contains", type=_parse_csv_list, default=list(BASELINE_DROP_CONTAINS),
+                    help='Исключить фичи по подстрокам, напр. "double_stack,track_cluster_"')
+    ap.add_argument("--drop-cols", type=_parse_csv_list, default=list(BASELINE_DROP_COLS),
+                    help='Исключить точные имена колонок, напр. "track_cluster_id,undercut_window_width"')
+    ap.add_argument("--keep-prefixes", type=_parse_csv_list, default=[],
+                    help='Оставить только фичи с этими префиксами перед drop-фильтрами')
     return ap
 
 
@@ -127,12 +155,16 @@ def from_args(args: Optional[argparse.Namespace] = None) -> TrainConfig:
         epochs=int(ns.epochs),
         lr=float(ns.lr),
         weight_decay=float(ns.weight_decay),
-        hidden=list(ns.hidden) if ns.hidden is not None else [256, 128],
+        hidden=list(ns.hidden) if ns.hidden is not None else list(BASELINE_HIDDEN),
         dropout=float(ns.dropout),
         seed=int(ns.seed),
         device=str(ns.device),
         log_every=int(ns.log_every),
         dnf_position=int(ns.dnf_position),
+        drop_prefixes=list(ns.drop_prefixes or []),
+        drop_contains=list(ns.drop_contains or []),
+        drop_cols=list(ns.drop_cols or []),
+        keep_prefixes=list(ns.keep_prefixes or []),
     )
 
                                                        

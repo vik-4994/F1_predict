@@ -2,166 +2,146 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import argparse, json, sys
+import argparse
+import sys
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List
+
 import numpy as np
 import pandas as pd
 import torch
 
-                   
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def read_feature_cols(artifacts: Path) -> List[str]:
-    p = artifacts / "feature_cols.txt"
-    cols = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    return cols
+from src.training import load_artifacts, sanitize_frame_columns, transform_with_scaler_df
 
-def read_scaler(artifacts: Path) -> Dict[str, List[float]]:
-    p = artifacts / "scaler.json"
-    return json.loads(p.read_text(encoding="utf-8"))
-
-def load_model(artifacts: Path, device: str = "cpu") -> torch.nn.Module:
-                                                       
-    sys.path.insert(0, str(Path.cwd()))
-    from src.training.inference import load_artifacts
-    model, scaler, feature_cols, meta, device_used = load_artifacts(artifacts, device=device)
-    model.eval()
-    return model
 
 def _read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in (".parquet", ".pq"):
         return pd.read_parquet(path)
     return pd.read_csv(path)
 
-def _build_X(df: pd.DataFrame, feature_cols: List[str], scaler: Dict[str, List[float]]) -> Tuple[np.ndarray, List[str]]:
-                                                                  
-    out = []
-    for c in feature_cols:
-        if c in df.columns:
-            out.append(df[c].values)
-        else:
-            out.append(np.full(len(df), np.nan, dtype=float))
-    X = np.vstack(out).T.astype(float)
 
-                                                                                
-    mu = np.asarray(scaler["mu"], dtype=float)
-    sigma = np.asarray(scaler["sigma"], dtype=float)
-    med = np.asarray(scaler["med"], dtype=float)
-
-                
-    nan_mask = ~np.isfinite(X)
-    if nan_mask.any():
-        X[nan_mask] = np.take(med, np.where(nan_mask)[1])
-
-    Z = (X - mu) / np.where(sigma == 0.0, 1.0, sigma)
-    Z = np.clip(Z, -8.0, 8.0)
-    return Z, feature_cols
-
-def _groups_for(col: str) -> str:
-                                         
-    if col.startswith("track_is_"): return "track_onehot"
-    if col.startswith("weather_"): return "weather_basic"
-    if col.startswith("history_"): return "history_form"
-    if col.startswith("telemetry_"): return "telemetry_history_pre"
-    if col.startswith("quali_pre_"): return "quali_priors_pre"
-    if col.startswith("strategy_pre_"): return "strategy_priors_pre"
-    if col.startswith("tyre_pre_"): return "tyre_priors_pre"
-    if col.startswith("dev_trend_pre_"): return "dev_trend_pre"
-    if col.startswith("reliability_risk_pre_"): return "reliability_risk_pre"
-    if col.startswith("pit_ops_risk_pre_"): return "pit_ops_risk_pre"
-    if col.startswith("traffic_overtake_pre_"): return "traffic_overtake_pre"
-    if col.startswith("driver_team_pre_"): return "driver_team_priors_pre"
-    if col.startswith("pit_ops_pre_"): return "pit_ops_pre"
+def _group_for(col: str) -> str:
+    if col.startswith("track_is_") or col.startswith("track_"):
+        return "track"
+    if col.startswith("weather_pre_"):
+        return "weather"
+    if col.startswith("hist_pre_"):
+        return "history"
+    if col.startswith("tele_pre_"):
+        return "telemetry"
+    if col.startswith("quali_pre_"):
+        return "qualifying"
+    if col.startswith(("expected_", "first_stint_", "undercut_", "overcut_")):
+        return "strategy"
+    if col.startswith(("compound_", "tyre_", "expected_deg_")):
+        return "tyres"
+    if col.startswith("reliab_"):
+        return "reliability"
+    if col.startswith(("pitcrew_", "slowstop_", "pitcrew_time_", "pit_ops_")):
+        return "pit_ops"
+    if col.startswith(("lap1_", "traffic_", "net_pass_")):
+        return "traffic"
+    if col.startswith(("driver_team_pre_", "driver_trackc_pre_")):
+        return "driver_priors"
     return "other"
 
-def _softmax(x: np.ndarray) -> np.ndarray:
-    x = x - x.max()
-    ex = np.exp(x)
-    s = ex.sum()
-    return ex / s if s > 0 else np.full_like(ex, 1.0 / len(ex))
 
-                        
+def inspect(artifacts_dir: Path, dump_path: Path, drivers_filter: List[str], topk: int, device: str = "cpu") -> None:
+    arts = load_artifacts(artifacts_dir, device=device)
+    if arts.model is None:
+        raise RuntimeError("No model found in artifacts directory")
 
-def inspect(artifacts: Path, dump_path: Path, drivers_filter: List[str], topk: int, device: str = "cpu"):
-    df = _read_table(dump_path)
+    df = sanitize_frame_columns(_read_table(dump_path))
     if df.empty:
-        print("Empty dump file", file=sys.stderr); sys.exit(2)
+        raise RuntimeError("Empty dump file")
 
-                                                      
     if drivers_filter:
         df = df[df["Driver"].astype(str).isin(drivers_filter)].copy()
         if df.empty:
-            print("No matching drivers in dump", file=sys.stderr); sys.exit(3)
+            raise RuntimeError("No matching drivers in dump")
 
-    feature_cols = read_feature_cols(artifacts)
-    scaler = read_scaler(artifacts)
+    df = df.reset_index(drop=True)
+    X = transform_with_scaler_df(df, arts.feature_cols, arts.scaler, as_array=True).astype(np.float32, copy=False)
 
-                                                        
-    Z, cols = _build_X(df, feature_cols, scaler)
+    model = arts.model
+    model.eval()
 
-                                          
-    model = load_model(artifacts, device=device)
-    tZ = torch.tensor(Z, dtype=torch.float32, requires_grad=True)
-    scores = model(tZ).squeeze(-1)        
-                           
-    order = torch.argsort(scores, descending=True).detach().cpu().numpy()
-    probs = _softmax(scores.detach().cpu().numpy())
+    xt = torch.tensor(X, dtype=torch.float32, device=arts.device, requires_grad=True)
+    with torch.enable_grad():
+        scores = model(xt)
+        if isinstance(scores, (list, tuple)):
+            scores = scores[0]
+        scores = scores.reshape(-1)
 
-                           
+    probs = torch.softmax(scores.detach(), dim=0).cpu().numpy()
+    table = (
+        pd.DataFrame(
+            {
+                "Driver": df["Driver"].astype(str).to_numpy(),
+                "score": scores.detach().cpu().numpy(),
+                "win_prob_softmax": probs,
+            }
+        )
+        .sort_values("score", ascending=False)
+        .reset_index(drop=True)
+    )
+
     print("\n=== RANKS ===")
-    tab = (pd.DataFrame({
-        "Driver": df["Driver"].values,
-        "score": scores.detach().cpu().numpy(),
-        "win_prob_softmax": probs,
-    }).sort_values("score", ascending=False).reset_index(drop=True))
-    print(tab.to_string(index=False, float_format=lambda x: f"{x: .6f}"))
+    print(table.to_string(index=False, float_format=lambda x: f"{x: .6f}"))
 
-                                     
     print("\n=== PER-DRIVER ATTRIBUTIONS (grad * input) ===")
-    for i in range(len(df)):
-                                                            
-        if drivers_filter and str(df.iloc[i]["Driver"]) not in drivers_filter:
-            continue
-
+    for i, driver in enumerate(df["Driver"].astype(str).tolist()):
         model.zero_grad(set_to_none=True)
-        if tZ.grad is not None:
-            tZ.grad.zero_()
+        if xt.grad is not None:
+            xt.grad.zero_()
         scores[i].backward(retain_graph=True)
-        grad = tZ.grad[i].detach().cpu().numpy()        
-        contrib = grad * Z[i]                                               
-                   
+
+        grad = xt.grad[i].detach().cpu().numpy()
+        contrib = grad * X[i]
         pos_idx = np.argsort(-contrib)[:topk]
         neg_idx = np.argsort(contrib)[:topk]
 
-        print(f"\n--- {df.iloc[i]['Driver']} ---")
+        print(f"\n--- {driver} ---")
         print("Top + contributions:")
         for j in pos_idx:
-            print(f"  {cols[j]:40s}  contrib={contrib[j]: .4f}   z={Z[i,j]: .3f}")
+            print(f"  {arts.feature_cols[j]:40s}  contrib={contrib[j]: .4f}   z={X[i, j]: .3f}")
 
         print("Top - contributions:")
         for j in neg_idx:
-            print(f"  {cols[j]:40s}  contrib={contrib[j]: .4f}   z={Z[i,j]: .3f}")
+            print(f"  {arts.feature_cols[j]:40s}  contrib={contrib[j]: .4f}   z={X[i, j]: .3f}")
 
-                          
         group_sums: Dict[str, float] = {}
-        for j, c in enumerate(cols):
-            g = _groups_for(c)
-            group_sums[g] = group_sums.get(g, 0.0) + abs(contrib[j])
-        group_df = pd.DataFrame(sorted(group_sums.items(), key=lambda x: -x[1]), columns=["group","|contrib|"])
+        for j, col in enumerate(arts.feature_cols):
+            group = _group_for(col)
+            group_sums[group] = group_sums.get(group, 0.0) + abs(float(contrib[j]))
+        group_df = pd.DataFrame(
+            sorted(group_sums.items(), key=lambda item: -item[1]),
+            columns=["group", "|contrib|"],
+        )
         print("\nGroup |contrib| sums:")
         print(group_df.to_string(index=False, float_format=lambda x: f"{x: .4f}"))
 
-def main():
+
+def main() -> None:
     ap = argparse.ArgumentParser("Inspect features dump with attributions")
     ap.add_argument("--artifacts", required=True, help="Папка с ranker.pt / scaler.json / feature_cols.txt")
-    ap.add_argument("--dump", required=True, help="CSV/Parquet из --dump-features")
-    ap.add_argument("--drivers", default="", help="Кого печатать (пример: 'ALB,NOR,VER,TSU'); пусто = все из дампа")
-    ap.add_argument("--topk", type=int, default=12, help="Сколько фич показывать в топах +/-")
+    ap.add_argument("--dump", required=True, help="CSV/Parquet with feature rows")
+    ap.add_argument("--drivers", default="", help="CSV of drivers to inspect; empty = all")
+    ap.add_argument("--topk", type=int, default=12, help="How many positive/negative features to print")
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
     drivers_filter = [s.strip() for s in args.drivers.split(",") if s.strip()]
-    inspect(Path(args.artifacts), Path(args.dump), drivers_filter, args.topk, device=args.device)
+    try:
+        inspect(Path(args.artifacts), Path(args.dump), drivers_filter, args.topk, device=args.device)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+
 
 if __name__ == "__main__":
     main()

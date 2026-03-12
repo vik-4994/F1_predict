@@ -47,6 +47,18 @@ try:
 except Exception:
                                         
     from utils import ensure_driver_index  # type: ignore
+    @dataclass(frozen=True)
+    class TrackProfile:  # type: ignore[no-redef]
+        straight_pct: float
+        fast_corner_ratio: float
+        lap_km: float
+        braking_ev_per_lap: int
+        drs_zones: int
+        tdeg_index: float
+        aero_df_index: float
+        pit_loss_s: float
+        fuel_effect_s_per10kg: float
+
     def _slugify(s: str) -> str:  # type: ignore
         import re, unicodedata
         s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
@@ -60,6 +72,9 @@ except Exception:
         return None
     def _ensure_driver_list(ctx, raw_dir: Path, year: int, rnd: int):  # type: ignore
         return []
+    TRACK_TO_PROFILE = {}
+    def normalize_track_slug(slug: str) -> str:  # type: ignore
+        return _slugify(slug)
 
                                                                
 

@@ -29,6 +29,7 @@ from .featureset import (
                         
     fit_scaler,
     transform_with_scaler,
+    sanitize_frame_columns,
     get_feature_groups,
              
     save_feature_cols,
@@ -123,6 +124,7 @@ __all__ = [
                 
     "select_feature_cols", "build_matrix", "FeatureScaler", "fit_scaler_on_df",
     "transform_with_scaler_df", "fit_scaler", "transform_with_scaler",
+    "sanitize_frame_columns",
     "get_feature_groups", "save_feature_cols", "load_feature_cols",
     "FeatureMatrix", "FeatureSpec",
                        

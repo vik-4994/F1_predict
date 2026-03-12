@@ -176,7 +176,7 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
 def _team_pitcrew_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int, prevN: int = 10) -> pd.DataFrame:
     prev = _list_prev_races(races, year, rnd, prevN)
     if not prev:
-        return pd.DataFrame(columns=['Team','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','slowstop_risk_team'])
+        return pd.DataFrame(columns=['Team','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','pitcrew_slowstop_risk_team'])
 
     samples: List[pd.DataFrame] = []
     for (y, r) in prev:
@@ -197,7 +197,7 @@ def _team_pitcrew_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int
         samples.append(df[['year','round','Team','duration_ms']])
 
     if not samples:
-        return pd.DataFrame(columns=['Team','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','slowstop_risk_team'])
+        return pd.DataFrame(columns=['Team','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','pitcrew_slowstop_risk_team'])
 
     pit = pd.concat(samples, ignore_index=True)
                    
@@ -216,9 +216,9 @@ def _team_pitcrew_priors(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int
     if np.isfinite(field_p90):
         risk = (pit.assign(is_slow=pit['duration_ms'] > field_p90)
                     .groupby('Team')['is_slow'].mean()
-                    .rename('slowstop_risk_team').reset_index())
+                    .rename('pitcrew_slowstop_risk_team').reset_index())
     else:
-        risk = agg[['Team']].assign(slowstop_risk_team=np.nan)
+        risk = agg[['Team']].assign(pitcrew_slowstop_risk_team=np.nan)
 
     return agg.merge(risk, on='Team', how='left')
 
@@ -317,12 +317,12 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     else:
         out['pitcrew_time_team_p50_s'] = np.nan
         out['pitcrew_time_team_p90_s'] = np.nan
-        out['slowstop_risk_team'] = np.nan
+        out['pitcrew_slowstop_risk_team'] = np.nan
 
     out['undercut_gain_hist_s'] = u_med
     out['overcut_gain_hist_s']  = o_med
 
-    keep = ['Driver','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','slowstop_risk_team','undercut_gain_hist_s','overcut_gain_hist_s']
+    keep = ['Driver','pitcrew_time_team_p50_s','pitcrew_time_team_p90_s','pitcrew_slowstop_risk_team','undercut_gain_hist_s','overcut_gain_hist_s']
     for c in keep:
         if c not in out.columns:
             out[c] = np.nan

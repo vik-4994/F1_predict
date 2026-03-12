@@ -24,6 +24,66 @@ class FeatureSpec:
                                             
 FeatureMatrix = Tuple[np.ndarray, Dict[str, object]]
 
+
+def _series_values_compatible(left: pd.Series, right: pd.Series) -> bool:
+    mask = left.notna() & right.notna()
+    if not bool(mask.any()):
+        return True
+
+    l = left[mask]
+    r = right[mask]
+
+    if pd.api.types.is_numeric_dtype(l) and pd.api.types.is_numeric_dtype(r):
+        return bool(
+            np.allclose(
+                l.to_numpy(dtype=np.float64, copy=False),
+                r.to_numpy(dtype=np.float64, copy=False),
+                equal_nan=True,
+                rtol=1e-6,
+                atol=1e-8,
+            )
+        )
+
+    return bool((l.astype(str) == r.astype(str)).all())
+
+
+def _coalesce_series(left: pd.Series, right: pd.Series, name: str) -> pd.Series:
+    if not _series_values_compatible(left, right):
+        raise ValueError(f"Incompatible duplicate column '{name}'")
+    out = left.copy()
+    fill_mask = out.isna() & right.notna()
+    if bool(fill_mask.any()):
+        out.loc[fill_mask] = right.loc[fill_mask]
+    return out
+
+
+def sanitize_frame_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return df
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    if not out.columns.has_duplicates:
+        return out
+
+    merged_cols: List[pd.Series] = []
+    merged_names: List[str] = []
+    seen: set[str] = set()
+
+    for name in out.columns:
+        if name in seen:
+            continue
+        seen.add(name)
+        idxs = [i for i, col in enumerate(out.columns) if col == name]
+        base = out.iloc[:, idxs[0]].copy()
+        for idx in idxs[1:]:
+            base = _coalesce_series(base, out.iloc[:, idx], name=name)
+        merged_cols.append(base)
+        merged_names.append(name)
+
+    sanitized = pd.concat(merged_cols, axis=1)
+    sanitized.columns = merged_names
+    return sanitized
+
 __all__ = [
                                                
     "select_feature_cols",
@@ -34,6 +94,7 @@ __all__ = [
                          
     "fit_scaler",
     "transform_with_scaler",
+    "sanitize_frame_columns",
                          
     "save_feature_cols",
     "load_feature_cols",
@@ -140,7 +201,8 @@ def select_feature_cols(
     if df is None or df.empty:
         return []
 
-    work = _coerce_object_featurelike(df) if coerce_object_featurelike else df
+    work = sanitize_frame_columns(df)
+    work = _coerce_object_featurelike(work) if coerce_object_featurelike else work
 
     cols = _numeric_columns(work)
 
@@ -170,7 +232,7 @@ def select_feature_cols(
                                                                
 
 def _ensure_columns(df: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataFrame:
-    out = df.copy()
+    out = sanitize_frame_columns(df)
     for c in feature_cols:
         if c not in out.columns:
             out[c] = np.nan

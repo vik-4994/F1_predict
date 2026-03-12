@@ -197,6 +197,14 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
     tag = f"{year} R{rnd:02d} {ses}"
     t0 = time.time()
     try:
+        warnings_list: List[str] = []
+
+        def _capture_optional(name: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:
+                warnings_list.append(f"{name}: {exc}")
+
         session = fastf1.get_session(year, rnd, ses)
         session.load(laps=True, telemetry=True, weather=True)
 
@@ -231,33 +239,28 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
 
                           
         if ses == "R":
-            try:
+            def _save_race_ctrl() -> None:
                 rcm = session.race_control_messages.reset_index(drop=True)
                 rcm = _add_race_id(rcm, year, rnd)
                 safe_to_csv(rcm, out_dir / f"race_ctrl_{year}_{rnd}.csv")
-            except Exception:
-                pass
-            try:
+            _capture_optional("race_ctrl", _save_race_ctrl)
+
+            def _save_track_status() -> None:
                 ts = session.track_status.reset_index(drop=True)
                 ts = _add_race_id(ts, year, rnd)
                 safe_to_csv(ts, out_dir / f"track_status_{year}_{rnd}.csv")
-            except Exception:
-                pass
+            _capture_optional("track_status", _save_track_status)
 
-                    
-        try:
+        def _save_entrylist() -> None:
             ent = entrylist_from_session(session)
             safe_to_csv(ent, out_dir / f"entrylist_{year}_{rnd}{suffix}.csv")
-        except Exception:
-            pass
+        _capture_optional("entrylist", _save_entrylist)
 
-                            
-        try:
+        def _save_stints() -> None:
             st = stints_from_laps(laps)
             if not st.empty:
                 safe_to_csv(st, out_dir / f"stints_{year}_{rnd}{suffix}.csv")
-        except Exception:
-            pass
+        _capture_optional("stints", _save_stints)
 
                                          
         drivers: List[int] = list(session.drivers)
@@ -270,8 +273,8 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             info = session.get_driver(drv)
             abbr = info.get("Abbreviation", str(drv))
 
-                           
-            try:
+            def _save_telemetry() -> None:
+                nonlocal tel_cnt
                 car = session.laps.pick_driver(drv).get_car_data()
                 if car is not None and len(car):
                     tdf = car.reset_index(drop=True)
@@ -280,36 +283,52 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
                         tdf = tdf.iloc[::telemetry_stride].reset_index(drop=True)
                     safe_to_csv(tdf, out_dir / f"telemetry_{year}_{rnd}{suffix}_{abbr}.csv")
                     tel_cnt += 1
-            except Exception:
-                pass
+            _capture_optional(f"telemetry:{abbr}", _save_telemetry)
 
-                         
-            try:
+            def _save_position() -> None:
+                nonlocal pos_cnt
                 pos = session.laps.pick_driver(drv).get_pos_data()
                 if pos is not None and len(pos):
                     pdf = pos.reset_index(drop=True)
                     pdf = _add_race_id(pdf, year, rnd)
                     safe_to_csv(pdf, out_dir / f"position_{year}_{rnd}{suffix}_{abbr}.csv")
                     pos_cnt += 1
-            except Exception:
-                pass
+            _capture_optional(f"position:{abbr}", _save_position)
 
                                                                              
         pit_cnt = 0
         if ses == "R":
-            try:
+            def _save_pit_stops() -> None:
+                nonlocal pit_cnt
                 pits = derive_pitstops_from_laps(laps)
                 if not pits.empty:
                     safe_to_csv(pits, out_dir / f"pit_stops_{year}_{rnd}.csv")
                     pit_cnt = pits.shape[0]
-            except Exception:
-                pass
+            _capture_optional("pit_stops", _save_pit_stops)
 
-                                              
-        return {"race": tag, "status": "ok", "drivers_tel": tel_cnt, "drivers_pos": pos_cnt, "pit_rows": pit_cnt, "secs": time.time() - t0}
+        status = "ok" if not warnings_list else f"ok_with_warnings:{len(warnings_list)}"
+        return {
+            "race": tag,
+            "status": status,
+            "drivers_tel": tel_cnt,
+            "drivers_pos": pos_cnt,
+            "pit_rows": pit_cnt,
+            "warning_count": len(warnings_list),
+            "warnings": warnings_list[:5],
+            "secs": time.time() - t0,
+        }
 
     except Exception as e:
-        return {"race": tag, "status": f"error: {e}", "drivers_tel": 0, "drivers_pos": 0, "pit_rows": 0, "secs": time.time() - t0}
+        return {
+            "race": tag,
+            "status": f"error: {e}",
+            "drivers_tel": 0,
+            "drivers_pos": 0,
+            "pit_rows": 0,
+            "warning_count": 0,
+            "warnings": [],
+            "secs": time.time() - t0,
+        }
 
 
 def get_max_round(year: int) -> int:
@@ -337,7 +356,8 @@ def export_season(year: int, sessions: Iterable[str], out_dir: Path, telemetry_s
         for fut in as_completed(tasks):
             res = fut.result()
             logs.append(res)
-            print(f"• {res['race']}: {res['status']} (tel:{res['drivers_tel']}, pos:{res['drivers_pos']}, pit:{res['pit_rows']}, {res['secs']:.1f}s)")
+            warn_tail = f", warn:{res.get('warning_count', 0)}" if res.get("warning_count", 0) else ""
+            print(f"• {res['race']}: {res['status']} (tel:{res['drivers_tel']}, pos:{res['drivers_pos']}, pit:{res['pit_rows']}{warn_tail}, {res['secs']:.1f}s)")
     return logs
 
 
