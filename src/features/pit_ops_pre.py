@@ -236,7 +236,7 @@ def _undercut_overcut_one_race(raw_dir: Path, y: int, r: int) -> Optional[Tuple[
     pp = ps[['Driver','lap']].dropna().drop_duplicates().copy()
     pp['pitted'] = True
     lt = lt.merge(pp, on=['Driver','lap'], how='left')
-    lt['pitted'] = lt['pitted'].fillna(False)
+    lt['pitted'] = lt['pitted'].fillna(False).astype(bool)
 
                                       
     ref = (lt.loc[~lt['pitted']].groupby('lap', as_index=False)['milliseconds'].median().rename(columns={'milliseconds':'ref_ms'}))

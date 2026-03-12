@@ -147,8 +147,8 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
     if comp_col is None:
         return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound"])  
     m = {"SOFT":"S","MEDIUM":"M","HARD":"H","Soft":"S","Medium":"M","Hard":"H","S":"S","M":"M","H":"H"}
-    df["C"] = df[comp_col].astype(str).map(lambda x: m.get(x, np.nan))
-    df = df.dropna(subset=["C"]).copy()
+    df["compound_norm"] = df[comp_col].astype(str).map(lambda x: m.get(x, np.nan))
+    df = df.dropna(subset=["compound_norm"]).copy()
 
                                          
     if pits is not None and not pits.empty and {"Driver","lap"}.issubset(pits.columns):
@@ -159,7 +159,14 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
         df = df.merge(excl, left_on=["Driver","lap"], right_on=["Driver","excl"], how="left")
         df = df[df["excl"].isna()].drop(columns=["excl"])                   
 
-    return df.rename(columns={"C":"Compound"})[ [c for c in ("raceId","Driver","lap","milliseconds","Compound") if c in df.columns] ]
+    out = pd.DataFrame({
+        "raceId": df["raceId"] if "raceId" in df.columns else 0,
+        "Driver": df["Driver"].astype(str),
+        "lap": pd.to_numeric(df["lap"], errors="coerce").astype("Int64"),
+        "milliseconds": pd.to_numeric(df["milliseconds"], errors="coerce"),
+        "Compound": df["compound_norm"].astype(str),
+    })
+    return out[["raceId","Driver","lap","milliseconds","Compound"]]
 
 
                                                                         
@@ -167,7 +174,10 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
 def _compound_mix_per_race_from_laps(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "Compound" not in df.columns:
         return pd.DataFrame(columns=["raceId","frac_S","frac_M","frac_H"])  
-    mix = (df.groupby(["raceId","Compound"])                               
+    work = df.copy()
+    if "raceId" not in work.columns:
+        work["raceId"] = 0
+    mix = (work.groupby(["raceId","Compound"])                               
              .size().rename("laps").reset_index()
              .pivot(index="raceId", columns="Compound", values="laps").fillna(0))
     mix = mix.div(mix.sum(axis=1), axis=0)
@@ -203,7 +213,10 @@ def _compound_mix_per_race_from_stints(st: pd.DataFrame) -> pd.DataFrame:
 def _pace_deltas_per_race(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "Compound" not in df.columns:
         return pd.DataFrame(columns=["raceId","d_SM_s","d_MH_s"])  
-    med = df.groupby(["raceId","Compound"])['milliseconds'].median().unstack("Compound")
+    work = df.copy()
+    if "raceId" not in work.columns:
+        work["raceId"] = 0
+    med = work.groupby(["raceId","Compound"])['milliseconds'].median().unstack("Compound")
     for c in ("S","M","H"):
         if c not in med.columns:
             med[c] = np.nan

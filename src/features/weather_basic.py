@@ -42,6 +42,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import re
+import warnings
 
                                                            
 
@@ -139,14 +140,29 @@ _TRACK_TEMP_COLS = ("TrackTemp", "TrackTemp_C", "TrackTemperature")
 _HUM_COLS = ("Humidity", "RH", "RelHumidity")
 _WIND_COLS = ("WindKph", "Wind_kph", "WindSpeed", "WindSpeedKph", "WindSpeedKMH")
 _RAIN_P_COLS = ("RainProb", "PrecipProb", "PrecipitationProb", "rain_probability")
+_RAIN_ACTUAL_COLS = ("Rainfall",)
 _TIME_COLS = ("Utc", "UTC", "Timestamp", "Time", "DateTime")
+
+
+def _to_datetime_mixed(series: pd.Series) -> pd.Series:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        try:
+            return pd.to_datetime(series, errors="coerce", utc=True, format="mixed")
+        except TypeError:
+            return pd.to_datetime(series, errors="coerce", utc=True)
 
 
 def _coerce_time(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for c in _TIME_COLS:
         if c in df.columns:
-            ts = pd.to_datetime(df[c], errors="coerce", utc=True)
+            td = pd.to_timedelta(df[c], errors="coerce")
+            if td.notna().any():
+                df["_td"] = td
+                if td.notna().mean() >= 0.5:
+                    break
+            ts = _to_datetime_mixed(df[c])
             if ts.notna().any():
                 df["_ts"] = ts
                 break
@@ -165,13 +181,30 @@ def _select_cols(df: pd.DataFrame, cands: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestamp | None) -> Dict[str, float]:
-    """Compute aggregates inside [t0, t1] if timestamps are present, else over full table."""
+def _aggregate_window(
+    df: pd.DataFrame,
+    t0: pd.Timestamp | None,
+    t1: pd.Timestamp | None,
+    *,
+    start_window_min: int = 15,
+) -> Dict[str, float]:
+    """Compute pre-race aggregates.
+
+    - If absolute timestamps are present, use the explicit session window.
+    - If only relative session time is present (FastF1 actual weather), use the first
+      `start_window_min` minutes as a proxy for pre-race / opening stint conditions.
+    - Otherwise fall back to the full table.
+    """
     d = _coerce_time(df)
     if "_ts" in d.columns and (t0 is not None and t1 is not None):
         d = d[(d["_ts"] >= t0) & (d["_ts"] <= t1)].copy()
         if d.empty:                                                  
             d = _coerce_time(df)
+    elif "_td" in d.columns:
+        lim = pd.Timedelta(minutes=int(start_window_min))
+        early = d[d["_td"].notna() & (d["_td"] <= lim)].copy()
+        if not early.empty:
+            d = early
 
     out: Dict[str, float] = {}
 
@@ -202,7 +235,18 @@ def _aggregate_window(df: pd.DataFrame, t0: pd.Timestamp | None, t1: pd.Timestam
         v = pd.to_numeric(d[c_rp], errors="coerce")
         out["weather_pre_rain_prob_p75"] = float(v.quantile(0.75)) if v.notna().any() else np.nan
     else:
-        out["weather_pre_rain_prob_p75"] = np.nan
+        c_rain = _select_cols(d, _RAIN_ACTUAL_COLS)
+        if c_rain:
+            v = (
+                d[c_rain]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .map({"TRUE": 1.0, "FALSE": 0.0, "1": 1.0, "0": 0.0})
+            )
+            out["weather_pre_rain_prob_p75"] = float(v.quantile(0.75)) if v.notna().any() else np.nan
+        else:
+            out["weather_pre_rain_prob_p75"] = np.nan
 
     out["weather_pre_records_n"] = int(len(d))
     return out

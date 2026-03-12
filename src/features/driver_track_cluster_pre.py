@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import re
 
                    
 try:
@@ -63,6 +64,7 @@ _CAND_EVENT_NAME_COLS = [
     "EventName", "Event", "GrandPrix", "RaceName", "raceName", "Name",
     "Circuit", "CircuitName", "CircuitShortName", "Track", "Venue",
 ]
+_RESULT_FILE_RE = re.compile(r"results_(\d{4})_(\d{1,2})(?:_R)?\.(csv|parquet)$", re.IGNORECASE)
 
 
 def _parse_datetime_cols(df: pd.DataFrame) -> pd.Series:
@@ -92,9 +94,14 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
     Минимально требуемые поля после нормализации: Year, Round, Driver, Points, Pos, Grid?, Status?, EventName/slug.
     """
     raw_dir = Path(raw_dir)
-    files = sorted([p for p in raw_dir.glob("**/*") if p.is_file() and "results" in p.name.lower() and p.suffix.lower() in (".csv", ".parquet")])
+    files = sorted([p for p in raw_dir.glob("results_*") if p.is_file() and _RESULT_FILE_RE.match(p.name)])
     dfs: List[pd.DataFrame] = []
     for p in files:
+        match = _RESULT_FILE_RE.match(p.name)
+        if not match:
+            continue
+        year = int(match.group(1))
+        rnd = int(match.group(2))
         try:
             if p.suffix.lower() == ".parquet":
                 df = pd.read_parquet(p)
@@ -107,11 +114,6 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
                            
         cols = {c: c for c in df.columns}
                       
-        if "Year" not in df.columns and "year" in df.columns:
-            cols["year"] = "Year"
-        if "Round" not in df.columns and "round" in df.columns:
-            cols["round"] = "Round"
-                
         if "Driver" not in df.columns:
             for c in ["DriverCode", "Code", "Abbreviation", "DriverId", "driver"]:
                 if c in df.columns:
@@ -124,12 +126,12 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
         grd_col = next((c for c in _CAND_GRID_COLS if c in df.columns), None)
         st_col  = next((c for c in _CAND_STATUS_COLS if c in df.columns), None)
 
-        if "Year" not in df.columns or "Round" not in df.columns or "Driver" not in df.columns:
+        if "Driver" not in df.columns:
             continue
 
         out = pd.DataFrame({
-            "Year": _to_int(df["Year"]),
-            "Round": _to_int(df["Round"]),
+            "Year": pd.Series([year] * len(df), dtype="Int64"),
+            "Round": pd.Series([rnd] * len(df), dtype="Int64"),
             "Driver": df["Driver"].astype(str),
             "Points": pd.to_numeric(df[pts_col], errors="coerce") if pts_col else pd.Series([np.nan]*len(df)),
             "Pos": _coerce_pos(df[pos_col]) if pos_col else pd.Series([np.nan]*len(df)),
@@ -144,9 +146,14 @@ def _load_results(raw_dir: Path) -> pd.DataFrame:
                 ev_name = df[c].astype(str)
                 break
         if ev_name is None:
-            ev_name = pd.Series(["" for _ in range(len(df))])
+            meta_slug = _event_slug_from_meta(raw_dir, year, rnd) or ""
+            ev_name = pd.Series([meta_slug.replace("_", " ")] * len(df))
         out["EventName"] = ev_name
-        out["EventSlug"] = out["EventName"].map(lambda s: _slugify(str(s)))
+        meta_slug = _event_slug_from_meta(raw_dir, year, rnd) or ""
+        if meta_slug:
+            out["EventSlug"] = meta_slug
+        else:
+            out["EventSlug"] = out["EventName"].map(lambda s: _slugify(str(s)))
 
                       
         out["EventTime"] = _parse_datetime_cols(df)
@@ -319,10 +326,8 @@ def featurize(ctx: dict) -> pd.DataFrame:
     out["driver_trackc_pre_retire_rate"] = agg["retire_rate_blend"].astype("float32")
     out["driver_trackc_pre_hist_n"] = agg["hist_n"].astype("float32")
 
-                                                                                                                   
-    out = ensure_driver_index(pd.Series(drivers), out.set_index("Driver").to_dict(orient="index"))
-
-    return out
+    base = pd.DataFrame({"Driver": pd.Series(drivers, dtype=str).dropna().unique().tolist()})
+    return base.merge(out, on="Driver", how="left")
 
 
 __all__ = ["featurize"]

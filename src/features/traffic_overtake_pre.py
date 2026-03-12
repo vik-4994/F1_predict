@@ -80,7 +80,7 @@ def _pos_col(df: pd.DataFrame) -> Optional[str]:
 
 
 def _drv_col(df: pd.DataFrame) -> Optional[str]:
-    return _col(df, ["Driver","driver","driverId","DriverId","name"])                  
+    return _col(df, ["Driver","Abbreviation","driver","code","driverRef","DriverRef","DriverCode","driverId","DriverId","name"])
 
 
 def _time_cols(df: pd.DataFrame) -> List[str]:
@@ -104,16 +104,17 @@ def _grid_map(raw_dir: Path, y: int, r: int) -> Dict[str, float]:
     q = read_csv_if_exists(raw_dir / f"qualifying_{y}_{r}.csv")
     if not q.empty:
         d = _drv_col(q) or "Driver"
-        p = _col(q, ["Position","position","pos"]) or None
+        p = _col(q, ["GridPosition","Grid","Position","position","pos"]) or None
         if p is None:
                                     
             q = q.copy(); q["__rk"] = np.arange(1, len(q)+1)
             return {str(a): float(b) for a,b in zip(q[d].astype(str), q["__rk"]) }
         return {str(a): float(b) for a,b in zip(q[d].astype(str), pd.to_numeric(q[p], errors="coerce"))}
     res = read_csv_if_exists(raw_dir / f"results_{y}_{r}.csv")
-    if not res.empty and ("grid" in res.columns):
+    gcol = _col(res, ["GridPosition","Grid","grid","gridPosition"])
+    if not res.empty and gcol:
         d = _drv_col(res) or "Driver"
-        return {str(a): float(b) for a,b in zip(res[d].astype(str), pd.to_numeric(res["grid"], errors="coerce"))}
+        return {str(a): float(b) for a,b in zip(res[d].astype(str), pd.to_numeric(res[gcol], errors="coerce"))}
     return {}
 
 
@@ -222,11 +223,15 @@ def _race_traffic_penalty(raw_dir: Path, y: int, r: int, dirty_gap_s: float = 1.
         return pd.DataFrame(columns=["Driver","traffic_penalty_s"]) 
 
     df["is_dirty"] = df["gap_ahead_s"] < dirty_gap_s
-                                  
-    g = df.groupby("Driver")
-    dirty = g.apply(lambda x: float(np.nanmean(x.loc[x["is_dirty"], "lap_time_s"])) if x["is_dirty"].any() else np.nan)
-    clean = g.apply(lambda x: float(np.nanmean(x.loc[~x["is_dirty"], "lap_time_s"])) if (~x["is_dirty"]).any() else np.nan)
-    pen = (dirty - clean).rename("traffic_penalty_s")
+
+    mean_by_state = (
+        df.groupby(["Driver", "is_dirty"], dropna=False)["lap_time_s"]
+        .mean()
+        .unstack("is_dirty")
+    )
+    dirty = mean_by_state[True] if True in mean_by_state.columns else pd.Series(dtype=float)
+    clean = mean_by_state[False] if False in mean_by_state.columns else pd.Series(dtype=float)
+    pen = dirty.subtract(clean, fill_value=np.nan).rename("traffic_penalty_s")
     out = pen.reset_index()
     return out
 
@@ -280,7 +285,8 @@ def _safe_roster(raw_dir: Path, year: int, rnd: int, explicit):
                                 
     for name in (f"entrylist_{year}_{rnd}_Q.csv",
                  f"entrylist_{year}_{rnd}.csv",
-                 f"results_{year}_{rnd}_Q.csv"):                      
+                 f"results_{year}_{rnd}_Q.csv",
+                 f"results_{year}_{rnd}.csv"):                      
         df = read_csv_if_exists(raw_dir / name)
         if not df.empty:
             col = _drv_col(df)

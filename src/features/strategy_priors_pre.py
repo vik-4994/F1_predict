@@ -226,7 +226,7 @@ def _per_lap_undercut_gain(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     ps['pitted'] = True
 
     lt = lt.merge(ps, on=['Driver','lap'], how='left')
-    lt['pitted'] = lt['pitted'].fillna(False)
+    lt['pitted'] = lt['pitted'].fillna(False).astype(bool)
 
     med_nonpit = (
         lt.loc[~lt['pitted']]
