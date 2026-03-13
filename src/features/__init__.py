@@ -17,8 +17,11 @@ from .track_onehot import featurize as track_onehot
 from .weather_basic import featurize as weather_basic
 from .event_chaos_priors_pre import featurize as event_chaos_priors_pre
 from .practice_longrun_pre import featurize as practice_longrun_pre
+from .practice_readiness_pre import featurize as practice_readiness_pre
 from .practice_compound_pre import featurize as practice_compound_pre
 from .weekend_team_delta_pre import featurize as weekend_team_delta_pre
+from .quali_evolution_pre import featurize as quali_evolution_pre
+from .weekend_field_form_pre import featurize as weekend_field_form_pre
 from .sprint_weekend_pre import featurize as sprint_weekend_pre
 from .history_form import featurize as history_form
 from .telemetry_history_pre import featurize as telemetry_history_pre
@@ -48,8 +51,11 @@ FEATURIZERS = [
     ("weather_basic", weather_basic),
     ("event_chaos_priors_pre", event_chaos_priors_pre),
     ("practice_longrun_pre", practice_longrun_pre),
+    ("practice_readiness_pre", practice_readiness_pre),
     ("practice_compound_pre", practice_compound_pre),
     ("weekend_team_delta_pre", weekend_team_delta_pre),
+    ("quali_evolution_pre", quali_evolution_pre),
+    ("weekend_field_form_pre", weekend_field_form_pre),
     ("sprint_weekend_pre", sprint_weekend_pre),
     ("history_form", history_form),
     ("telemetry_history_pre", telemetry_history_pre),
@@ -116,8 +122,11 @@ __all__ = [
     "weather_basic",
     "event_chaos_priors_pre",
     "practice_longrun_pre",
+    "practice_readiness_pre",
     "practice_compound_pre",
     "weekend_team_delta_pre",
+    "quali_evolution_pre",
+    "weekend_field_form_pre",
     "sprint_weekend_pre",
     "history_form",
     "telemetry_history_pre",

@@ -13,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.scenario_builder import build_scenario_features, resolve_official_track_name
+from src.scenario_builder import (
+    build_scenario_features,
+    resolve_official_track_name,
+    resolve_scenario_mode,
+)
 
 POINTS_BY_RANK: Dict[int, int] = {
     1: 25,
@@ -46,6 +50,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--raw-dir", type=str, required=True)
     ap.add_argument("--year", type=int, required=True)
     ap.add_argument("--rounds", type=str, default=None, help='Optional CSV/range like "1,2,5-8"')
+    ap.add_argument(
+        "--scenario-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "observed", "future"],
+        help="auto=use observed weekend data when available, otherwise priors-only future mode",
+    )
     ap.add_argument("--tau", type=float, default=1.2, help="softmax temperature")
     ap.add_argument("--out-dir", type=str, default=None, help="Optional directory for CSV exports")
     ap.add_argument("--race-topk", type=int, default=3, help="How many drivers to show per race summary")
@@ -102,13 +113,15 @@ def _available_rounds_from_raw(raw_dir: Path, year: int) -> List[int]:
     return sorted(rounds)
 
 
-def resolve_rounds(raw_dir: Path, year: int, rounds_arg: Optional[str]) -> List[int]:
+def resolve_rounds(raw_dir: Path, year: int, rounds_arg: Optional[str], allow_future: bool = False) -> List[int]:
     requested = _parse_rounds_arg(rounds_arg)
     schedule_rounds = _load_schedule_rounds(raw_dir, year)
     available_rounds = _available_rounds_from_raw(raw_dir, year)
 
     if requested is not None:
         base = requested
+    elif allow_future and schedule_rounds:
+        base = schedule_rounds
     elif schedule_rounds and available_rounds:
         base = [rnd for rnd in schedule_rounds if rnd in set(available_rounds)]
     else:
@@ -129,25 +142,36 @@ def _find_grid_col(cols: Iterable[str]) -> Optional[str]:
 
 
 def _team_map_for_round(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
-    for name in (
-        f"results_{year}_{rnd}_Q.csv",
-        f"entrylist_{year}_{rnd}_Q.csv",
-        f"results_{year}_{rnd}.csv",
-        f"entrylist_{year}_{rnd}.csv",
-    ):
-        path = raw_dir / name
-        if not path.exists():
+    pairs = [(int(year), int(rnd))]
+    pairs.extend((int(year), r) for r in range(int(rnd) - 1, 0, -1))
+    for y in range(int(year) - 1, int(year) - 4, -1):
+        if y > 0:
+            pairs.extend((y, r) for r in range(24, 0, -1))
+
+    seen: set[tuple[int, int]] = set()
+    for y, r in pairs:
+        if (y, r) in seen:
             continue
-        df = pd.read_csv(path)
-        if df.empty:
-            continue
-        dcol = next((c for c in ("Abbreviation", "Driver", "code", "driverRef", "BroadcastName") if c in df.columns), None)
-        tcol = next((c for c in ("TeamName", "Team", "Constructor", "ConstructorName") if c in df.columns), None)
-        if dcol and tcol:
-            out = pd.DataFrame({"Driver": df[dcol].astype(str), "Team": df[tcol].astype(str)})
-            out = out.dropna(subset=["Driver"]).drop_duplicates("Driver")
-            if not out.empty:
-                return out
+        seen.add((y, r))
+        for name in (
+            f"results_{y}_{r}_Q.csv",
+            f"entrylist_{y}_{r}_Q.csv",
+            f"results_{y}_{r}.csv",
+            f"entrylist_{y}_{r}.csv",
+        ):
+            path = raw_dir / name
+            if not path.exists():
+                continue
+            df = pd.read_csv(path)
+            if df.empty:
+                continue
+            dcol = next((c for c in ("Abbreviation", "Driver", "code", "driverRef", "BroadcastName") if c in df.columns), None)
+            tcol = next((c for c in ("TeamName", "Team", "Constructor", "ConstructorName") if c in df.columns), None)
+            if dcol and tcol:
+                out = pd.DataFrame({"Driver": df[dcol].astype(str), "Team": df[tcol].astype(str)})
+                out = out.dropna(subset=["Driver"]).drop_duplicates("Driver")
+                if not out.empty:
+                    return out
     return pd.DataFrame(columns=["Driver", "Team"])
 
 
@@ -202,7 +226,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     args = parse_args(argv)
     raw_dir = Path(args.raw_dir)
-    rounds = resolve_rounds(raw_dir, int(args.year), args.rounds)
+    rounds = resolve_rounds(
+        raw_dir,
+        int(args.year),
+        args.rounds,
+        allow_future=(str(args.scenario_mode).lower() in {"auto", "future"}),
+    )
     if not rounds:
         raise SystemExit(f"No available rounds found for {args.year}")
 
@@ -212,6 +241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     for rnd in rounds:
         official_track = resolve_official_track_name(raw_dir, int(args.year), int(rnd))
+        scenario_mode = resolve_scenario_mode(raw_dir, int(args.year), int(rnd), args.scenario_mode)
         try:
             feat_df, track_name, _ = build_scenario_features(
                 raw_dir,
@@ -220,6 +250,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 track=official_track,
                 drivers=None,
                 mode="auto",
+                scenario_mode=scenario_mode,
                 allow_fallback_actual=True,
                 verbose=False,
             )
@@ -236,6 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         rank_df = assign_race_points(rank_df)
         rank_df["track"] = str(track_name or official_track or f"Round {rnd}")
+        rank_df["scenario_mode"] = scenario_mode
 
         grid_col = _find_grid_col(feat_df.columns)
         if grid_col is not None:
@@ -250,7 +282,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if not team_map.empty:
             rank_df = rank_df.merge(team_map, on="Driver", how="left")
 
-        print(_race_summary_line(rank_df, str(rank_df["track"].iloc[0]), int(args.race_topk)))
+        label = f"{str(rank_df['track'].iloc[0])} [{scenario_mode}]"
+        print(_race_summary_line(rank_df, label, int(args.race_topk)))
         all_preds.append(rank_df)
 
     if not all_preds:

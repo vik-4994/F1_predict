@@ -101,6 +101,28 @@ _META_FILES = (
     "meta_{y}_{r}_Q.csv",
 )
 
+_SESSION_NAME_ALIASES = {
+    "FP1": {"FP1", "PRACTICE 1"},
+    "FP2": {"FP2", "PRACTICE 2"},
+    "FP3": {"FP3", "PRACTICE 3"},
+    "Q": {"Q", "QUALIFYING"},
+    "SQ": {"SQ", "SPRINT QUALIFYING", "SPRINT SHOOTOUT", "SS"},
+    "S": {"S", "SPRINT"},
+    "R": {"R", "RACE"},
+}
+
+_PRE_RACE_FALLBACK_ORDER = ("Q", "SQ", "S", "FP3", "FP2", "FP1")
+
+
+def _normalize_session_code(value: object) -> Optional[str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    for code, aliases in _SESSION_NAME_ALIASES.items():
+        if text in aliases:
+            return code
+    return text if text in _SESSION_NAME_ALIASES else None
+
 
 def _session_window(raw_dir: Path, year: int, rnd: int, session: str) -> Tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """Try to get UTC window [start,end] for the session from meta files.
@@ -132,6 +154,67 @@ def _session_window(raw_dir: Path, year: int, rnd: int, session: str) -> Tuple[p
                 if s.notna().any() and e.notna().any():
                     return s.min(), e.max()
     return None, None
+
+
+def _schedule_row(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
+    sched = _read_csv(raw_dir / f"schedule_{year}.csv")
+    if sched.empty:
+        return pd.DataFrame()
+    round_col = "round" if "round" in sched.columns else ("RoundNumber" if "RoundNumber" in sched.columns else None)
+    if round_col is None:
+        return pd.DataFrame()
+    rr = sched.loc[pd.to_numeric(sched[round_col], errors="coerce") == int(rnd)].copy()
+    return rr.head(1)
+
+
+def _available_pre_race_sessions(raw_dir: Path, year: int, rnd: int, session: str) -> List[str]:
+    row = _schedule_row(raw_dir, year, rnd)
+    target = _normalize_session_code(session) or "R"
+    if row.empty:
+        return [code for code in _PRE_RACE_FALLBACK_ORDER if (raw_dir / f"weather_{year}_{rnd}_{code}.csv").exists()]
+
+    items: List[Tuple[pd.Timestamp, str]] = []
+    for idx in range(1, 6):
+        code = _normalize_session_code(row.iloc[0].get(f"Session{idx}", ""))
+        if not code:
+            continue
+        ts = pd.NaT
+        for col in (f"Session{idx}DateUtc", f"Session{idx}Date"):
+            if col in row.columns:
+                ts = _to_datetime_mixed(pd.Series([row.iloc[0].get(col)])).iloc[0]
+                if pd.notna(ts):
+                    break
+        items.append((ts, code))
+
+    target_ts = next((ts for ts, code in items if code == target), pd.NaT)
+    before = []
+    for ts, code in items:
+        if code == target:
+            continue
+        if pd.notna(target_ts) and pd.notna(ts):
+            if ts < target_ts:
+                before.append((ts, code))
+        else:
+            before.append((ts, code))
+
+    before.sort(
+        key=lambda item: (
+            pd.notna(item[0]),
+            item[0] if pd.notna(item[0]) else pd.Timestamp.min.tz_localize("UTC"),
+        ),
+        reverse=True,
+    )
+    codes = [code for _, code in before]
+    if not codes:
+        codes = list(_PRE_RACE_FALLBACK_ORDER)
+    unique_codes = []
+    seen = set()
+    for code in codes:
+        if code in seen:
+            continue
+        seen.add(code)
+        unique_codes.append(code)
+    return [code for code in unique_codes if (raw_dir / f"weather_{year}_{rnd}_{code}.csv").exists()]
 
                                                            
 
@@ -187,6 +270,7 @@ def _aggregate_window(
     t1: pd.Timestamp | None,
     *,
     start_window_min: int = 15,
+    end_window_min: int | None = None,
 ) -> Dict[str, float]:
     """Compute pre-race aggregates.
 
@@ -201,10 +285,18 @@ def _aggregate_window(
         if d.empty:                                                  
             d = _coerce_time(df)
     elif "_td" in d.columns:
-        lim = pd.Timedelta(minutes=int(start_window_min))
-        early = d[d["_td"].notna() & (d["_td"] <= lim)].copy()
-        if not early.empty:
-            d = early
+        if end_window_min is not None:
+            td = d["_td"].dropna()
+            if not td.empty:
+                lim = td.max() - pd.Timedelta(minutes=int(end_window_min))
+                tail = d[d["_td"].notna() & (d["_td"] >= lim)].copy()
+                if not tail.empty:
+                    d = tail
+        if end_window_min is None or d.empty:
+            lim = pd.Timedelta(minutes=int(start_window_min))
+            early = d[d["_td"].notna() & (d["_td"] <= lim)].copy()
+            if not early.empty:
+                d = early
 
     out: Dict[str, float] = {}
 
@@ -255,7 +347,7 @@ def _aggregate_window(
 
 @dataclass
 class WeatherOptions:
-    mode: str = "forecast"                                           
+    mode: str = "pre_race"                                           
     allow_fallback_actual: bool = False                             
 
 
@@ -268,7 +360,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     year: int
     round: int
     session: str = "R" (optional)
-    mode: "forecast" | "actual" | "auto"  (default "forecast")
+    mode: "pre_race" | "forecast" | "actual" | "auto"  (default "pre_race")
     allow_fallback_actual: bool (default False)
     drivers: Optional[List[str]]
     """
@@ -278,26 +370,42 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     session = str(ctx.get("session", "R"))
 
     opt = WeatherOptions(
-        mode=str(ctx.get("mode", "forecast")).lower(),
+        mode=str(ctx.get("mode", "pre_race")).lower(),
         allow_fallback_actual=bool(ctx.get("allow_fallback_actual", False)),
     )
 
                                     
     forecast_p = raw_dir / f"weather_forecast_{year}_{rnd}.csv"
-    actual_p   = raw_dir / f"weather_{year}_{rnd}.csv"
+    actual_p = raw_dir / f"weather_{year}_{rnd}.csv"
 
     weather_path: Optional[Path] = None
+    use_tail_window = False
     if opt.mode == "forecast":
         weather_path = forecast_p if forecast_p.exists() else None
     elif opt.mode == "actual":
         weather_path = actual_p if actual_p.exists() else None
+    elif opt.mode == "pre_race":
+        if forecast_p.exists():
+            weather_path = forecast_p
+        else:
+            for code in _available_pre_race_sessions(raw_dir, year, rnd, session=session):
+                cand = raw_dir / f"weather_{year}_{rnd}_{code}.csv"
+                if cand.exists():
+                    weather_path = cand
+                    use_tail_window = True
+                    break
     else:        
         if forecast_p.exists():
             weather_path = forecast_p
-        elif opt.allow_fallback_actual and actual_p.exists():
-            weather_path = actual_p
         else:
-            weather_path = None
+            for code in _available_pre_race_sessions(raw_dir, year, rnd, session=session):
+                cand = raw_dir / f"weather_{year}_{rnd}_{code}.csv"
+                if cand.exists():
+                    weather_path = cand
+                    use_tail_window = True
+                    break
+        if weather_path is None and opt.allow_fallback_actual and actual_p.exists():
+            weather_path = actual_p
 
                     
     drivers = _load_roster(raw_dir, year, rnd, ctx.get("drivers"))
@@ -323,7 +431,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
                                                                  
     dfw = _read_csv(weather_path)
     t0, t1 = _session_window(raw_dir, year, rnd, session=session)
-    agg = _aggregate_window(dfw, t0, t1)
+    agg = _aggregate_window(dfw, t0, t1, end_window_min=15 if use_tail_window else None)
 
     if base.empty:
                                                                         
@@ -344,7 +452,7 @@ if __name__ == "__main__":
     ap.add_argument("--year", type=int, required=True)
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--session", default="R")
-    ap.add_argument("--mode", default="forecast", choices=["forecast", "actual", "auto"])
+    ap.add_argument("--mode", default="pre_race", choices=["pre_race", "forecast", "actual", "auto"])
     ap.add_argument("--allow-fallback-actual", action="store_true")
     ap.add_argument("--drivers-csv", default=None, help="Optional CSV with a 'Driver' column")
     ap.add_argument("--out", required=True)

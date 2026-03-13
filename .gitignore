@@ -42,12 +42,16 @@ logs/
 mlruns/
 wandb/
 
-data/*
-data/features/
-data/artifacts/
+data/fastf1_cache/
+data/processed/
+data/raw_csv/
 data/raw/*
 !data/raw/.gitkeep
 !data/raw/README.md
+
+models/*/
+out/season_*/
+reports/feature_health_*.csv
 
 *.parquet
 *.arrow

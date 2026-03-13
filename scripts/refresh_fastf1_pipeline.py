@@ -51,7 +51,7 @@ def main() -> None:
     ap.add_argument("--processed-dir", type=Path, default=Path("data/processed"))
     ap.add_argument("--years", nargs="+", type=int, default=None, help="Years to refresh. Default: last two seasons.")
     ap.add_argument("--last-n-seasons", type=int, default=2)
-    ap.add_argument("--sessions", nargs="+", default=["R", "Q", "S", "SQ", "FP2", "FP3"])
+    ap.add_argument("--sessions", nargs="+", default=["R", "Q", "S", "SQ", "FP1", "FP2", "FP3"])
     ap.add_argument("--telemetry-stride", type=int, default=1)
     ap.add_argument("--max-workers", type=int, default=4)
     ap.add_argument("--driver-limit", type=int, default=None)
@@ -63,6 +63,12 @@ def main() -> None:
         help="Refresh the last N completed rounds per year before rebuilding features.",
     )
     ap.add_argument("--skip-existing", action="store_true", help="Skip already exported raw files.")
+    ap.add_argument(
+        "--backfill-missing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Backfill any completed rounds that are missing one or more requested raw sessions.",
+    )
     ap.add_argument("--with-targets", action="store_true", help="Rebuild targets alongside features.")
     ap.add_argument("--ctx-json", type=str, default=None, help="Extra build context passed through to build_features.py.")
     ap.add_argument("--no-build", action="store_true", help="Only refresh raw FastF1 data.")
@@ -89,6 +95,29 @@ def main() -> None:
         latest_only=args.latest_only,
         lookback_rounds=args.lookback_rounds,
     )
+
+    if args.backfill_missing:
+        for year in years:
+            missing_rounds = export_mod.missing_completed_rounds_for_year(
+                args.raw_dir,
+                year,
+                args.sessions,
+            )
+            if not missing_rounds:
+                continue
+            print(f"Backfilling missing completed rounds for {year}: {', '.join(map(str, missing_rounds))}")
+            logs.extend(
+                export_mod.export_season(
+                    year=year,
+                    sessions=args.sessions,
+                    out_dir=args.raw_dir,
+                    telemetry_stride=args.telemetry_stride,
+                    max_workers=args.max_workers,
+                    driver_limit=args.driver_limit,
+                    skip_existing=True,
+                    rounds=missing_rounds,
+                )
+            )
 
     tags = _race_tags_from_logs(logs)
     if args.no_build:

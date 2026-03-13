@@ -166,6 +166,23 @@ def _driver_team_map(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
     return pd.DataFrame(columns=["Driver","Team"])
 
 
+def _latest_known_team_map(raw_dir: Path, year: int, rnd: int) -> pd.DataFrame:
+    pairs = []
+    for path in raw_dir.glob("results_*.csv"):
+        pr = _parse_fn_triplet(path.name)
+        if pr and ((pr[0] < year) or (pr[0] == year and pr[1] < rnd)):
+            pairs.append(pr)
+    for path in raw_dir.glob("entrylist_*.csv"):
+        pr = _parse_fn_triplet(path.name)
+        if pr and ((pr[0] < year) or (pr[0] == year and pr[1] < rnd)):
+            pairs.append(pr)
+    for y, r in sorted(set(pairs), reverse=True):
+        df = _driver_team_map(raw_dir, y, r)
+        if not df.empty:
+            return df
+    return pd.DataFrame(columns=["Driver", "Team"])
+
+
 def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
     for src in (f"results_{year}_{rnd}.csv", f"results_{year}_{rnd}_R.csv", f"entrylist_{year}_{rnd}_R.csv", f"entrylist_{year}_{rnd}_Q.csv"):
         df = read_csv_if_exists(raw_dir / src)
@@ -178,6 +195,18 @@ def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
         for c in ("Abbreviation","Driver"):
             if c in laps.columns:
                 return laps[c].astype(str).dropna().drop_duplicates().tolist()
+    return []
+
+
+def _ctx_drivers(ctx: Dict) -> List[str]:
+    raw = ctx.get("drivers", ctx.get("roster", None))
+    if isinstance(raw, pd.DataFrame):
+        for col in ("Driver", "Abbreviation", "code", "driverRef"):
+            if col in raw.columns and raw[col].notna().any():
+                return raw[col].astype(str).dropna().drop_duplicates().tolist()
+        return []
+    if isinstance(raw, (list, tuple, set, pd.Series)):
+        return pd.Series(list(raw), dtype=str).dropna().astype(str).drop_duplicates().tolist()
     return []
 
                                                                             
@@ -259,7 +288,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         per_race.append(dpace)
 
     if not per_race:
-        roster = _current_drivers(raw_dir, year, rnd)
+        roster = _ctx_drivers(ctx) or _current_drivers(raw_dir, year, rnd)
         if not roster:
             return pd.DataFrame()
         out = pd.DataFrame({"Driver": roster})
@@ -309,7 +338,7 @@ def featurize(ctx: Dict) -> pd.DataFrame:
     stab = pd.DataFrame(stab_rows)
 
                                                 
-    roster = _current_drivers(raw_dir, year, rnd)
+    roster = _ctx_drivers(ctx) or _current_drivers(raw_dir, year, rnd)
     if not roster:
                                                         
         roster = all_dr["Driver"].astype(str).dropna().drop_duplicates().tolist()
@@ -319,6 +348,8 @@ def featurize(ctx: Dict) -> pd.DataFrame:
 
                                                        
     d2t_now = _driver_team_map(raw_dir, year, rnd)
+    if d2t_now.empty:
+        d2t_now = _latest_known_team_map(raw_dir, year, rnd)
     if not d2t_now.empty and not t_trend.empty:
         out = out.merge(d2t_now, on="Driver", how="left").merge(t_trend, on="Team", how="left")
     else:

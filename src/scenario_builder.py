@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -17,6 +18,44 @@ _ROSTER_FILES = (
 )
 _DRIVER_COLS = ("Abbreviation", "Driver", "code", "driverRef", "BroadcastName")
 _TRACK_COLS = ("EventName", "OfficialEventName", "Location", "CircuitName", "Name")
+FUTURE_SAFE_MODULES = [
+    "track_onehot",
+    "track_profile",
+    "driver_track_cluster_pre",
+    "weather_basic",
+    "event_chaos_priors_pre",
+    "history_form",
+    "telemetry_history_pre",
+    "quali_priors_pre",
+    "tyre_priors_pre",
+    "dev_trend_pre",
+    "reliability_risk_pre",
+    "traffic_overtake_pre",
+    "driver_team_priors_pre",
+]
+_OBSERVED_FILE_PATTERNS = (
+    "results_{y}_{r}.csv",
+    "results_{y}_{r}_Q.csv",
+    "results_{y}_{r}_SQ.csv",
+    "results_{y}_{r}_S.csv",
+    "laps_{y}_{r}.csv",
+    "laps_{y}_{r}_Q.csv",
+    "laps_{y}_{r}_SQ.csv",
+    "laps_{y}_{r}_S.csv",
+    "laps_{y}_{r}_FP1.csv",
+    "laps_{y}_{r}_FP2.csv",
+    "laps_{y}_{r}_FP3.csv",
+    "weather_{y}_{r}.csv",
+    "weather_{y}_{r}_Q.csv",
+    "weather_{y}_{r}_SQ.csv",
+    "weather_{y}_{r}_S.csv",
+    "weather_{y}_{r}_FP1.csv",
+    "weather_{y}_{r}_FP2.csv",
+    "weather_{y}_{r}_FP3.csv",
+    "session_status_{y}_{r}.csv",
+    "track_status_{y}_{r}.csv",
+    "race_control_{y}_{r}.csv",
+)
 
 
 def _dedupe_strings(values: Iterable[object]) -> List[str]:
@@ -31,6 +70,34 @@ def _dedupe_strings(values: Iterable[object]) -> List[str]:
     return out
 
 
+def _read_csv(path: Path) -> pd.DataFrame:
+    try:
+        if not path.exists():
+            return pd.DataFrame()
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _extract_roster(df: pd.DataFrame) -> List[str]:
+    if df.empty:
+        return []
+    for col in _DRIVER_COLS:
+        if col in df.columns and df[col].notna().any():
+            return _dedupe_strings(df[col].tolist())
+    return []
+
+
+def _scan_known_roster_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
+    rounds: set[Tuple[int, int]] = set()
+    for pattern in ("entrylist_*.csv", "results_*.csv"):
+        for path in raw_dir.glob(pattern):
+            match = re.search(r"_(\d{4})_(\d{1,2})(?:_[A-Za-z0-9]+)?\.csv$", path.name)
+            if match:
+                rounds.add((int(match.group(1)), int(match.group(2))))
+    return sorted(rounds)
+
+
 def load_roster_drivers(
     raw_dir: Path | str,
     year: int,
@@ -42,15 +109,52 @@ def load_roster_drivers(
         return _dedupe_strings(drivers)
 
     for pattern in _ROSTER_FILES:
-        df = pd.read_csv(raw_dir / pattern.format(y=year, r=rnd)) if (raw_dir / pattern.format(y=year, r=rnd)).exists() else pd.DataFrame()
-        if df.empty:
-            continue
-        for col in _DRIVER_COLS:
-            if col in df.columns and df[col].notna().any():
-                vals = _dedupe_strings(df[col].tolist())
-                if vals:
-                    return vals
+        vals = _extract_roster(_read_csv(raw_dir / pattern.format(y=year, r=rnd)))
+        if vals:
+            return vals
     return []
+
+
+def load_latest_known_roster_drivers(
+    raw_dir: Path | str,
+    year: int,
+    rnd: int,
+    drivers: Optional[Sequence[str]] = None,
+) -> List[str]:
+    raw_dir = Path(raw_dir)
+    current = load_roster_drivers(raw_dir, year, rnd, drivers)
+    if current:
+        return current
+    if drivers:
+        return _dedupe_strings(drivers)
+
+    rounds = _scan_known_roster_rounds(raw_dir)
+    usable = [(y, r) for (y, r) in rounds if (y < int(year)) or (y == int(year) and r < int(rnd))]
+    usable.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for y, r in usable:
+        vals = load_roster_drivers(raw_dir, y, r, None)
+        if vals:
+            return vals
+    return []
+
+
+def has_observed_weekend_data(raw_dir: Path | str, year: int, rnd: int) -> bool:
+    raw_dir = Path(raw_dir)
+    return any((raw_dir / pattern.format(y=year, r=rnd)).exists() for pattern in _OBSERVED_FILE_PATTERNS)
+
+
+def resolve_scenario_mode(
+    raw_dir: Path | str,
+    year: int,
+    rnd: int,
+    scenario_mode: str = "auto",
+) -> str:
+    mode = str(scenario_mode or "auto").strip().lower()
+    if mode not in {"auto", "observed", "future"}:
+        raise ValueError(f"Unsupported scenario mode: {scenario_mode}")
+    if mode != "auto":
+        return mode
+    return "observed" if has_observed_weekend_data(raw_dir, year, rnd) else "future"
 
 
 def resolve_official_track_name(raw_dir: Path | str, year: int, rnd: int) -> Optional[str]:
@@ -102,11 +206,18 @@ def build_scenario_features(
     track: Optional[str] = None,
     drivers: Optional[Sequence[str]] = None,
     mode: str = "auto",
+    scenario_mode: str = "auto",
     allow_fallback_actual: bool = True,
     verbose: bool = False,
 ) -> Tuple[pd.DataFrame, Optional[str], List[str]]:
     raw_dir = Path(raw_dir)
-    roster = load_roster_drivers(raw_dir, sim_year, sim_round, drivers)
+    resolved_scenario_mode = resolve_scenario_mode(raw_dir, sim_year, sim_round, scenario_mode)
+    if resolved_scenario_mode == "future":
+        roster = load_latest_known_roster_drivers(raw_dir, sim_year, sim_round, drivers)
+        modules = list(FUTURE_SAFE_MODULES)
+    else:
+        roster = load_roster_drivers(raw_dir, sim_year, sim_round, drivers)
+        modules = None
     track_name = (str(track).strip() if track else "") or resolve_official_track_name(raw_dir, sim_year, sim_round)
 
     ctx = {
@@ -114,6 +225,7 @@ def build_scenario_features(
         "year": int(sim_year),
         "round": int(sim_round),
         "mode": str(mode),
+        "scenario_mode": resolved_scenario_mode,
         "allow_fallback_actual": bool(allow_fallback_actual),
         "verbose": bool(verbose),
     }
@@ -123,9 +235,9 @@ def build_scenario_features(
         ctx["drivers"] = roster
         ctx["roster"] = roster
 
-    df = sanitize_frame_columns(featurize_pre(ctx))
+    df = sanitize_frame_columns(featurize_pre(ctx, modules=modules))
     if df.empty:
-        raise RuntimeError("Failed to rebuild scenario features from raw data")
+        raise RuntimeError(f"Failed to rebuild scenario features from raw data ({resolved_scenario_mode} mode)")
     if "Driver" not in df.columns:
         raise RuntimeError("Scenario features are missing 'Driver'")
 
@@ -151,7 +263,11 @@ def build_scenario_features(
 
 __all__ = [
     "build_scenario_features",
+    "FUTURE_SAFE_MODULES",
+    "has_observed_weekend_data",
+    "load_latest_known_roster_drivers",
     "load_roster_drivers",
     "ordered_driver_slice",
+    "resolve_scenario_mode",
     "resolve_official_track_name",
 ]

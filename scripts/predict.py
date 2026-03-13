@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.scenario_builder import build_scenario_features, resolve_official_track_name
+from src.scenario_builder import build_scenario_features, resolve_official_track_name, resolve_scenario_mode
 from src.frame_utils import sanitize_frame_columns
 
 if TYPE_CHECKING:
@@ -131,6 +131,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--artifacts", type=str, required=True)
     ap.add_argument("--features", type=str, default=None, help="Fallback legacy features table")
     ap.add_argument("--raw-dir", type=str, default=None, help="Raw CSV directory to rebuild pre-race features for the target event")
+    ap.add_argument(
+        "--scenario-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "observed", "future"],
+        help="auto=use observed weekend data when available, otherwise priors-only future mode",
+    )
     ap.add_argument("--mode", type=str, default="custom")
     ap.add_argument("--drivers", type=str, default=None, help='Optional CSV "VER,NOR,..."; omit for full grid in --raw-dir mode')
     ap.add_argument("--track", type=str, default=None, help="Optional track/event name; defaults to official event name for the round")
@@ -407,6 +414,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.raw_dir:
         raw_dir = Path(args.raw_dir)
         official_track = _warn_track_round_mismatch(raw_dir, int(args.sim_year), int(args.sim_round), track_name)
+        resolved_scenario_mode = resolve_scenario_mode(
+            raw_dir,
+            int(args.sim_year),
+            int(args.sim_round),
+            args.scenario_mode,
+        )
         df, resolved_track, roster = build_scenario_features(
             raw_dir,
             int(args.sim_year),
@@ -414,6 +427,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             track=track_name,
             drivers=(drivers or None),
             mode="auto",
+            scenario_mode=resolved_scenario_mode,
             allow_fallback_actual=True,
             verbose=False,
         )
@@ -422,6 +436,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             raise SystemExit("Could not resolve track name from --track or raw schedule/meta")
         if not drivers:
             drivers = roster
+        if resolved_scenario_mode == "future":
+            print(
+                f"[info] using priors-only future scenario for {args.sim_year} round {args.sim_round}",
+                file=sys.stderr,
+            )
     else:
         if not args.features:
             raise SystemExit("Either --raw-dir or --features is required")

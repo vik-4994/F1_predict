@@ -403,6 +403,8 @@ def get_feature_groups(cols: Iterable[str]) -> Dict[str, List[str]]:
             put("weather", c)
         elif c.startswith("sprint_pre_"):
             put("sprint", c)
+        elif c.startswith("field_pre_"):
+            put("weekend_field", c)
         elif c.startswith("strategy_") or c.startswith("expected_stop_"):
             put("strategy", c)
         elif c.startswith("tyre_") or c.startswith("compound_") or c.startswith("deg_"):
@@ -417,7 +419,11 @@ def get_feature_groups(cols: Iterable[str]) -> Dict[str, List[str]]:
             put("telemetry_quali", c)
         elif c.startswith("quali_") or c.startswith("qexec_"):
             put("qualifying", c)
+        elif c.startswith("qevo_"):
+            put("qualifying", c)
         elif c.startswith("prac_"):
+            put("practice", c)
+        elif c.startswith("ready_"):
             put("practice", c)
         elif c.startswith("driver_team_pre_"):
             put("driver_team", c)

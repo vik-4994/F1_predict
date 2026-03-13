@@ -4,7 +4,7 @@
 Export all FastF1 datasets needed for our pre-race features.
 
 What it exports (into --out-dir, default: data/raw_csv):
-Per race (year, round) and per requested session (default: R and Q):
+Per race (year, round) and per requested session (default: R Q S SQ FP1 FP2 FP3):
   • laps_{Y}_{R}[_SES].csv        – full Laps table (+ 'milliseconds' numeric)
   • weather_{Y}_{R}[_SES].csv     – session weather data
   • results_{Y}_{R}[_SES].csv     – FastF1 session results (for reference/QA)
@@ -41,6 +41,7 @@ from typing import Optional, Iterable, Dict, List, Tuple
 import pandas as pd
 import numpy as np
 import fastf1
+from fastf1 import _api as ffapi
 
 
                                
@@ -304,6 +305,89 @@ def completed_rounds_for_year(
     )
 
 
+def _session_codes_from_schedule_row(row: pd.Series) -> List[str]:
+    codes: List[str] = []
+    for idx in range(1, 6):
+        code = _normalize_session_code(row.get(f"Session{idx}", ""))
+        if code:
+            codes.append(code)
+    return codes
+
+
+def _normalize_session_code(name: object) -> Optional[str]:
+    text = str(name or "").strip()
+    if not text:
+        return None
+    upper = text.upper()
+    for code, aliases in _SESSION_ALIASES.items():
+        if text in aliases or upper in {alias.upper() for alias in aliases}:
+            return code
+    return None
+
+
+def _session_anchor_path(out_dir: Path, year: int, rnd: int, session: str) -> Path:
+    suffix = "" if session == "R" else f"_{session}"
+    return out_dir / f"laps_{year}_{rnd}{suffix}.csv"
+
+
+def missing_rounds_from_schedule(
+    schedule: pd.DataFrame,
+    out_dir: Path,
+    sessions: Iterable[str],
+    *,
+    completed_only: bool = True,
+    now_utc: Optional[pd.Timestamp] = None,
+) -> List[int]:
+    sessions = [str(s).upper() for s in sessions]
+    rounds = resolve_rounds_from_schedule(
+        schedule,
+        sessions,
+        completed_only=completed_only,
+        latest_only=False,
+        lookback_rounds=None,
+        now_utc=now_utc,
+    )
+    if not rounds:
+        return []
+
+    round_col = "RoundNumber" if "RoundNumber" in schedule.columns else "round"
+    missing: List[int] = []
+    for rnd in rounds:
+        row = schedule.loc[pd.to_numeric(schedule[round_col], errors="coerce") == int(rnd)]
+        if row.empty:
+            continue
+        available_codes = set(_session_codes_from_schedule_row(row.iloc[0]))
+        requested = [code for code in sessions if code in available_codes]
+        if not requested:
+            continue
+        event_year = row.iloc[0].get("year", row.iloc[0].get("Year", np.nan))
+        if pd.isna(event_year) and "raceId" in row.columns:
+            race_id = pd.to_numeric(row.iloc[0].get("raceId"), errors="coerce")
+            if pd.notna(race_id):
+                event_year = int(race_id) // 1000
+        event_year = int(event_year) if pd.notna(event_year) else 0
+        if any(not _session_anchor_path(out_dir, event_year, int(rnd), ses).exists() for ses in requested):
+            missing.append(int(rnd))
+    return sorted(set(missing))
+
+
+def missing_completed_rounds_for_year(
+    out_dir: Path,
+    year: int,
+    sessions: Iterable[str],
+    *,
+    now_utc: Optional[pd.Timestamp] = None,
+) -> List[int]:
+    try:
+        sched = fastf1.get_event_schedule(year)
+    except Exception:
+        return []
+    sched = sched.copy()
+    if "year" not in sched.columns:
+        sched["year"] = int(year)
+    return missing_rounds_from_schedule(sched, out_dir, sessions, completed_only=True, now_utc=now_utc)
+
+
 def per_race_weather_summary(year: int, rnd: int, ses: str, weather_df: pd.DataFrame) -> Dict[str, float]:
     """Median temps for weather.csv aggregate."""
     ww = weather_df.copy()
@@ -323,6 +407,141 @@ def per_race_weather_summary(year: int, rnd: int, ses: str, weather_df: pd.DataF
         else:
             out[new] = np.nan
     return out
+
+
+def _fallback_driver_info(api_path: str) -> pd.DataFrame:
+    try:
+        raw = ffapi.driver_info(api_path)
+    except Exception:
+        return pd.DataFrame(columns=["DriverNumber", "Abbreviation", "BroadcastName", "TeamName", "FirstName", "LastName"])
+    rows = []
+    for key, entry in (raw or {}).items():
+        rows.append(
+            {
+                "DriverNumber": str(entry.get("RacingNumber") or key),
+                "Abbreviation": entry.get("Tla"),
+                "BroadcastName": entry.get("BroadcastName"),
+                "TeamName": entry.get("TeamName"),
+                "FirstName": entry.get("FirstName"),
+                "LastName": entry.get("LastName"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _fallback_session_start_time(api_path: str) -> Optional[pd.Timedelta]:
+    try:
+        status = ffapi.session_status_data(api_path)
+    except Exception:
+        return pd.NaT
+    if not status:
+        return pd.NaT
+    try:
+        df = pd.DataFrame(status)
+    except Exception:
+        return pd.NaT
+    if df.empty or "Status" not in df.columns or "Time" not in df.columns:
+        return pd.NaT
+    started = df.loc[df["Status"].astype(str) == "Started", "Time"]
+    if started.empty:
+        return pd.NaT
+    return started.iloc[0]
+
+
+def _fallback_build_laps(api_path: str, session_name: str) -> pd.DataFrame:
+    laps_data, _stream, _splits = ffapi._extended_timing_data(api_path)
+    if laps_data is None or laps_data.empty:
+        return pd.DataFrame()
+
+    app_data = ffapi.timing_app_data(api_path)
+    app_data = app_data.reset_index(drop=True) if isinstance(app_data, pd.DataFrame) else pd.DataFrame(app_data)
+    d_info = _fallback_driver_info(api_path)
+    session_start_time = _fallback_session_start_time(api_path)
+
+    base = laps_data.copy().reset_index(drop=True)
+    if app_data is None or app_data.empty:
+        base["Compound"] = ""
+        base["TyreLife"] = np.nan
+        base["Stint"] = 1
+        base["FreshTyre"] = False
+    else:
+        merged_parts = []
+        for drv, d1 in base.groupby("Driver", sort=False):
+            d2 = app_data.loc[app_data["Driver"].astype(str) == str(drv)].copy()
+            d1 = d1.sort_values("Time").reset_index(drop=True)
+            if d2.empty:
+                d1["Compound"] = ""
+                d1["TyreLife"] = np.nan
+                d1["Stint"] = 1
+                d1["FreshTyre"] = False
+            else:
+                d2 = d2.sort_values("Time").reset_index(drop=True)
+                merged = pd.merge_asof(d1, d2, on="Time", by="Driver", direction="backward")
+                merged["Compound"] = merged["Compound"].fillna("")
+                merged["TyreLife"] = pd.to_numeric(merged.get("StartLaps"), errors="coerce")
+                merged["Stint"] = pd.to_numeric(merged.get("Stint"), errors="coerce").fillna(0).astype(int) + 1
+                merged["FreshTyre"] = merged.get("New", False).fillna(False).astype(bool)
+                d1 = merged
+            merged_parts.append(d1)
+        base = pd.concat(merged_parts, ignore_index=True, sort=False) if merged_parts else base.iloc[0:0].copy()
+
+    base = base.rename(columns={"Driver": "DriverNumber", "NumberOfLaps": "LapNumber"})
+    base["DriverNumber"] = base["DriverNumber"].astype(str)
+    if not d_info.empty:
+        d_info["DriverNumber"] = d_info["DriverNumber"].astype(str)
+        base = base.merge(d_info, on="DriverNumber", how="left")
+    else:
+        base["Abbreviation"] = base["DriverNumber"]
+        base["TeamName"] = np.nan
+
+    base["Driver"] = base.get("Abbreviation", base["DriverNumber"]).fillna(base["DriverNumber"]).astype(str)
+    base["Team"] = base.get("TeamName", np.nan)
+    base["LapStartTime"] = (
+        base.sort_values(["DriverNumber", "Time"], kind="mergesort")
+        .groupby("DriverNumber", sort=False)["Time"]
+        .shift(1)
+    )
+    if pd.notna(session_start_time):
+        is_race_like = str(session_name).strip().lower() in {"race", "sprint", "qualifying", "sprint qualifying", "sprint shootout"}
+        if is_race_like:
+            first_mask = base["LapStartTime"].isna()
+            base.loc[first_mask, "LapStartTime"] = session_start_time
+    base["Position"] = pd.to_numeric(base.get("Position"), errors="coerce")
+    base["IsAccurate"] = base["LapTime"].notna()
+    base["TrackStatus"] = ""
+    keep_cols = [
+        "Driver",
+        "DriverNumber",
+        "Team",
+        "LapNumber",
+        "LapTime",
+        "Time",
+        "LapStartTime",
+        "Stint",
+        "Compound",
+        "TyreLife",
+        "FreshTyre",
+        "Position",
+        "PitOutTime",
+        "PitInTime",
+        "Sector1Time",
+        "Sector2Time",
+        "Sector3Time",
+        "Sector1SessionTime",
+        "Sector2SessionTime",
+        "Sector3SessionTime",
+        "SpeedI1",
+        "SpeedI2",
+        "SpeedFL",
+        "SpeedST",
+        "IsPersonalBest",
+        "IsAccurate",
+        "TrackStatus",
+    ]
+    for col in keep_cols:
+        if col not in base.columns:
+            base[col] = np.nan
+    return base[keep_cols].reset_index(drop=True)
 
 
 def _is_unavailable_session_error(exc: Exception) -> bool:
@@ -347,6 +566,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
     t0 = time.time()
     try:
         warnings_list: List[str] = []
+        failed_step: Optional[str] = None
 
         def _capture_optional(name: str, fn) -> None:
             try:
@@ -354,21 +574,31 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             except Exception as exc:
                 warnings_list.append(f"{name}: {exc}")
 
+        def _optional_frame(name: str, getter) -> pd.DataFrame:
+            try:
+                df = getter()
+            except Exception as exc:
+                warnings_list.append(f"{name}: {exc}")
+                return pd.DataFrame()
+            if df is None:
+                return pd.DataFrame()
+            return df.reset_index(drop=True) if isinstance(df, pd.DataFrame) else pd.DataFrame(df).reset_index(drop=True)
+
+        def _optional_value(name: str, getter, default=""):
+            try:
+                value = getter()
+            except Exception as exc:
+                warnings_list.append(f"{name}: {exc}")
+                return default
+            return default if value is None else value
+
         session = fastf1.get_session(year, rnd, ses)
-        session.load(laps=True, telemetry=True, weather=True)
+        # Car telemetry is fetched per-driver later; preloading it here is both slower
+        # and has been brittle on freshly published weekends.
+        session.load(laps=True, telemetry=False, weather=True, messages=True)
 
-                         
-        laps = session.laps.reset_index(drop=True)
-        laps = _add_race_id(laps, year, rnd)
-        laps = laps_with_ms(laps)
+        suffix = "" if ses == "R" else f"_{ses}"
 
-        weather = session.weather_data.reset_index(drop=True)
-        weather = _add_race_id(weather, year, rnd)
-
-        results = session.results.reset_index(drop=True)
-        results = _add_race_id(results, year, rnd)
-
-              
         meta = {
             "raceId": int(year) * 1000 + int(rnd),
             "Year": year, "Round": rnd, "Session": ses,
@@ -379,20 +609,20 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             "EventDate": str(session.event.get("EventDate", "")),
             "EventFormat": session.event.get("EventFormat", ""),
             "F1ApiSupport": bool(getattr(session, "f1_api_support", False)),
-            "SessionName": getattr(session, "name", ses),
-            "SessionDate": str(getattr(session, "date", "")),
-            "SessionStartTime": str(getattr(session, "session_start_time", "")),
-            "T0Date": str(getattr(session, "t0_date", "")),
-            "ApiPath": getattr(session, "api_path", ""),
+            "SessionName": _optional_value("session.name", lambda: session.name, ses),
+            "SessionDate": str(_optional_value("session.date", lambda: session.date, "")),
+            "SessionStartTime": str(_optional_value("session.session_start_time", lambda: session.session_start_time, "")),
+            "T0Date": str(_optional_value("session.t0_date", lambda: session.t0_date, "")),
+            "ApiPath": _optional_value("session.api_path", lambda: session.api_path, ""),
         }
         meta_df = pd.DataFrame([meta])
-
-                        
-        suffix = "" if ses == "R" else f"_{ses}"
-        safe_to_csv(laps, out_dir / f"laps_{year}_{rnd}{suffix}.csv")
-        safe_to_csv(weather, out_dir / f"weather_{year}_{rnd}{suffix}.csv")
-        safe_to_csv(results, out_dir / f"results_{year}_{rnd}{suffix}.csv")
         safe_to_csv(meta_df, out_dir / f"meta_{year}_{rnd}{suffix}.csv")
+
+        def _save_entrylist() -> None:
+            ent = entrylist_from_session(session)
+            if not ent.empty:
+                safe_to_csv(ent, out_dir / f"entrylist_{year}_{rnd}{suffix}.csv")
+        _capture_optional("entrylist", _save_entrylist)
 
         def _save_session_info() -> None:
             info = getattr(session, "session_info", None)
@@ -406,6 +636,37 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
                 sdf = _add_race_id(sdf, year, rnd)
                 safe_to_csv(sdf, out_dir / f"session_info_{year}_{rnd}{suffix}.csv")
         _capture_optional("session_info", _save_session_info)
+
+        weather = _optional_frame("weather_data", lambda: session.weather_data)
+        if not weather.empty:
+            weather = _add_race_id(weather, year, rnd)
+            safe_to_csv(weather, out_dir / f"weather_{year}_{rnd}{suffix}.csv")
+
+        results = _optional_frame("results", lambda: session.results)
+        if not results.empty:
+            results = _add_race_id(results, year, rnd)
+            safe_to_csv(results, out_dir / f"results_{year}_{rnd}{suffix}.csv")
+
+        try:
+            laps = session.laps.reset_index(drop=True)
+            laps = _add_race_id(laps, year, rnd)
+            laps = laps_with_ms(laps)
+            safe_to_csv(laps, out_dir / f"laps_{year}_{rnd}{suffix}.csv")
+        except Exception as exc:
+            warnings_list.append(f"laps: {exc}")
+            try:
+                laps = _fallback_build_laps(session.api_path, getattr(session, "name", ses))
+                if not laps.empty:
+                    laps = _add_race_id(laps, year, rnd)
+                    laps = laps_with_ms(laps)
+                    safe_to_csv(laps, out_dir / f"laps_{year}_{rnd}{suffix}.csv")
+                    warnings_list.append("laps_fallback_api: used _extended_timing_data + timing_app_data")
+                else:
+                    failed_step = "laps"
+            except Exception as fallback_exc:
+                failed_step = "laps"
+                warnings_list.append(f"laps_fallback_api: {fallback_exc}")
+                laps = pd.DataFrame()
 
         def _save_session_status() -> None:
             ss = session.session_status.reset_index(drop=True)
@@ -428,53 +689,47 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
                 safe_to_csv(ts, out_dir / f"track_status_{year}_{rnd}.csv")
             _capture_optional("track_status", _save_track_status)
 
-        def _save_entrylist() -> None:
-            ent = entrylist_from_session(session)
-            safe_to_csv(ent, out_dir / f"entrylist_{year}_{rnd}{suffix}.csv")
-        _capture_optional("entrylist", _save_entrylist)
-
-        def _save_stints() -> None:
-            st = stints_from_laps(laps)
-            if not st.empty:
-                safe_to_csv(st, out_dir / f"stints_{year}_{rnd}{suffix}.csv")
-        _capture_optional("stints", _save_stints)
-
-                                         
-        drivers: List[int] = list(session.drivers)
-        if driver_limit is not None:
-            drivers = drivers[:driver_limit]
-
         tel_cnt = 0
         pos_cnt = 0
-        for drv in drivers:
-            info = session.get_driver(drv)
-            abbr = info.get("Abbreviation", str(drv))
-
-            def _save_telemetry() -> None:
-                nonlocal tel_cnt
-                car = session.laps.pick_driver(drv).get_car_data()
-                if car is not None and len(car):
-                    tdf = car.reset_index(drop=True)
-                    tdf = _add_race_id(tdf, year, rnd)
-                    if telemetry_stride and telemetry_stride > 1:
-                        tdf = tdf.iloc[::telemetry_stride].reset_index(drop=True)
-                    safe_to_csv(tdf, out_dir / f"telemetry_{year}_{rnd}{suffix}_{abbr}.csv")
-                    tel_cnt += 1
-            _capture_optional(f"telemetry:{abbr}", _save_telemetry)
-
-            def _save_position() -> None:
-                nonlocal pos_cnt
-                pos = session.laps.pick_driver(drv).get_pos_data()
-                if pos is not None and len(pos):
-                    pdf = pos.reset_index(drop=True)
-                    pdf = _add_race_id(pdf, year, rnd)
-                    safe_to_csv(pdf, out_dir / f"position_{year}_{rnd}{suffix}_{abbr}.csv")
-                    pos_cnt += 1
-            _capture_optional(f"position:{abbr}", _save_position)
-
-                                                                             
         pit_cnt = 0
-        if ses == "R":
+        if not laps.empty:
+            def _save_stints() -> None:
+                st = stints_from_laps(laps)
+                if not st.empty:
+                    safe_to_csv(st, out_dir / f"stints_{year}_{rnd}{suffix}.csv")
+            _capture_optional("stints", _save_stints)
+
+            drivers: List[int] = list(session.drivers)
+            if driver_limit is not None:
+                drivers = drivers[:driver_limit]
+
+            for drv in drivers:
+                info = session.get_driver(drv)
+                abbr = info.get("Abbreviation", str(drv))
+
+                def _save_telemetry() -> None:
+                    nonlocal tel_cnt
+                    car = session.laps.pick_driver(drv).get_car_data()
+                    if car is not None and len(car):
+                        tdf = car.reset_index(drop=True)
+                        tdf = _add_race_id(tdf, year, rnd)
+                        if telemetry_stride and telemetry_stride > 1:
+                            tdf = tdf.iloc[::telemetry_stride].reset_index(drop=True)
+                        safe_to_csv(tdf, out_dir / f"telemetry_{year}_{rnd}{suffix}_{abbr}.csv")
+                        tel_cnt += 1
+                _capture_optional(f"telemetry:{abbr}", _save_telemetry)
+
+                def _save_position() -> None:
+                    nonlocal pos_cnt
+                    pos = session.laps.pick_driver(drv).get_pos_data()
+                    if pos is not None and len(pos):
+                        pdf = pos.reset_index(drop=True)
+                        pdf = _add_race_id(pdf, year, rnd)
+                        safe_to_csv(pdf, out_dir / f"position_{year}_{rnd}{suffix}_{abbr}.csv")
+                        pos_cnt += 1
+                _capture_optional(f"position:{abbr}", _save_position)
+
+        if ses == "R" and not laps.empty:
             def _save_pit_stops() -> None:
                 nonlocal pit_cnt
                 pits = derive_pitstops_from_laps(laps)
@@ -483,13 +738,17 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
                     pit_cnt = pits.shape[0]
             _capture_optional("pit_stops", _save_pit_stops)
 
-        status = "ok" if not warnings_list else f"ok_with_warnings:{len(warnings_list)}"
+        if failed_step == "laps":
+            status = f"partial_missing_laps{':' + str(len(warnings_list)) if warnings_list else ''}"
+        else:
+            status = "ok" if not warnings_list else f"ok_with_warnings:{len(warnings_list)}"
         return {
             "race": tag,
             "year": int(year),
             "round": int(rnd),
             "session": str(ses),
             "status": status,
+            "failed_step": failed_step,
             "drivers_tel": tel_cnt,
             "drivers_pos": pos_cnt,
             "pit_rows": pit_cnt,
@@ -506,6 +765,7 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
                 "round": int(rnd),
                 "session": str(ses),
                 "status": "skipped_unavailable_session",
+                "failed_step": None,
                 "drivers_tel": 0,
                 "drivers_pos": 0,
                 "pit_rows": 0,
@@ -519,11 +779,12 @@ def export_one_session(year: int, rnd: int, ses: str, out_dir: Path, telemetry_s
             "round": int(rnd),
             "session": str(ses),
             "status": f"error: {e}",
+            "failed_step": failed_step,
             "drivers_tel": 0,
             "drivers_pos": 0,
             "pit_rows": 0,
-            "warning_count": 0,
-            "warnings": [],
+            "warning_count": len(warnings_list) if 'warnings_list' in locals() else 0,
+            "warnings": warnings_list[:5] if 'warnings_list' in locals() else [],
             "secs": time.time() - t0,
         }
 
@@ -680,7 +941,7 @@ def main():
     ap.add_argument("--cache-dir", type=Path, default=Path("data/fastf1_cache"), help="FastF1 cache directory.")
     ap.add_argument("--years", nargs="+", type=int, default=None, help="Years to export, e.g. --years 2024 2025. Default: last two years.")
     ap.add_argument("--last-n-seasons", type=int, default=2, help="If --years not set, export this many most-recent seasons.")
-    ap.add_argument("--sessions", nargs="+", default=["R", "Q"], help="Session codes to export (e.g., R Q FP2 S SS).")
+    ap.add_argument("--sessions", nargs="+", default=["R", "Q", "S", "SQ", "FP1", "FP2", "FP3"], help="Session codes to export (e.g., R Q FP1 FP2 FP3 S SQ).")
     ap.add_argument("--telemetry-stride", type=int, default=1, help="Downsample telemetry rows (1=no downsample, 5=every 5th row).")
     ap.add_argument("--max-workers", type=int, default=4, help="Parallel workers.")
     ap.add_argument("--driver-limit", type=int, default=None, help="Limit number of drivers per session (debug).")

@@ -93,6 +93,20 @@ def _event_name_from_meta(raw_dir: Path, year: int, rnd: int) -> Optional[str]:
                 if v: return v
     return None
 
+
+def _track_keys_from_meta(raw_dir: Path, year: int, rnd: int) -> set[str]:
+    keys: set[str] = set()
+    for pat in (f"meta_{year}_{rnd}.csv", f"meta_{year}_{rnd}_Q.csv"):
+        df = _read_csv(raw_dir / pat)
+        if df.empty:
+            continue
+        for c in (*EVENT_COLS, *CIRCUIT_COLS, "OfficialEventName", "Location"):
+            if c in df.columns and df[c].notna().any():
+                slug = _slugify(str(df[c].iloc[0]).strip())
+                if slug:
+                    keys.add(slug)
+    return keys
+
 def _event_slug_from_meta(raw_dir: Path, year: int, rnd: int) -> Optional[str]:
     name = _event_name_from_meta(raw_dir, year, rnd)
     return _slugify(name) if name else None
@@ -112,6 +126,27 @@ def _event_name_from_races_df(races_df: pd.DataFrame, year: int, rnd: int) -> Op
         if c in df.columns and df[c].notna().any():
             return str(df[c].iloc[0]).strip()
     return None
+
+
+def _track_keys_from_races_df(races_df: pd.DataFrame, year: int, rnd: int) -> set[str]:
+    keys: set[str] = set()
+    if races_df is None or races_df.empty:
+        return keys
+    ycol = next((c for c in races_df.columns if c.lower() in ("year", "season")), None)
+    rcol = next((c for c in races_df.columns if c.lower() == "round"), None)
+    if ycol is None or rcol is None:
+        return keys
+    df = races_df.copy()
+    df = df[(pd.to_numeric(df[ycol], errors="coerce") == year) & (pd.to_numeric(df[rcol], errors="coerce") == rnd)]
+    if df.empty:
+        return keys
+    row = df.iloc[0]
+    for c in (*EVENT_COLS, *CIRCUIT_COLS, "OfficialEventName", "Location"):
+        if c in df.columns and pd.notna(row.get(c)):
+            slug = _slugify(str(row.get(c)).strip())
+            if slug:
+                keys.add(slug)
+    return keys
 
 def _ensure_driver_list(ctx, raw_dir: Path, year: int, rnd: int) -> list[str]:
     roster = getattr(ctx, "roster", None) if not isinstance(ctx, dict) else ctx.get("roster")
@@ -219,13 +254,16 @@ class Options:
     include_onehot: bool = False                              
     require_meta_match: bool = True                                                                                 
     min_hist: int = 0                                                               
+    same_track_search_lookback: int = 256
 
-def _build_same_track_agg(raw_dir: Path, target_slug: str, past: List[Tuple[int,int]]) -> pd.DataFrame:
-    """Собрать историю только по тем прошлым этапам, у которых slug(meta_{y}_{r}) совпадает с target_slug."""
+def _build_same_track_agg(raw_dir: Path, target_keys: set[str], past: List[Tuple[int,int]]) -> pd.DataFrame:
+    """Собрать историю только по тем прошлым этапам, у которых совпадает хотя бы один track key."""
     rows = []
+    if not target_keys:
+        return pd.DataFrame(columns=["Driver"])
     for (y, r) in past:
-        slug = _event_slug_from_meta(raw_dir, y, r)
-        if not slug or slug != target_slug:
+        hist_keys = _track_keys_from_meta(raw_dir, y, r)
+        if not hist_keys or not (hist_keys & target_keys):
             continue
         tbl = _results_table(raw_dir, y, r)
         if not tbl.empty:
@@ -282,6 +320,9 @@ def _featurize_impl(
     if not name:
         name = _event_name_from_meta(raw_dir, year, rnd) or _event_name_from_races_df(races_df, year, rnd)
     slug = _slugify(name) if name else None
+    target_keys = _track_keys_from_meta(raw_dir, year, rnd) | _track_keys_from_races_df(races_df, year, rnd)
+    if track_name:
+        target_keys.add(_slugify(track_name))
 
                      
     drivers = [str(x) for x in (roster or [])]
@@ -299,9 +340,15 @@ def _featurize_impl(
         base[col] = 1
 
                                               
-    past = _list_past(races_df, raw_dir, year, rnd, max_lookback=opt.max_lookback)
-    if slug:
-        same = _build_same_track_agg(raw_dir, slug, past)
+    past = _list_past(
+        races_df,
+        raw_dir,
+        year,
+        rnd,
+        max_lookback=max(opt.max_lookback, opt.same_track_search_lookback),
+    )
+    if target_keys:
+        same = _build_same_track_agg(raw_dir, target_keys, past)
         if not same.empty:
             base = base.merge(same, on="Driver", how="left")
         else:
@@ -355,6 +402,7 @@ def featurize(*args, **kwargs) -> pd.DataFrame:
         opts = Options(
             max_lookback=int(get("max_lookback", 20)),
             include_onehot=bool(get("include_onehot", True)),
+            same_track_search_lookback=int(get("same_track_search_lookback", 256)),
         )
 
         track_name = get("track", get("event", get("circuit", None)))

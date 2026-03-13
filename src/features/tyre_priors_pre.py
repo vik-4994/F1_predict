@@ -31,6 +31,7 @@ try:
     from .track_onehot import featurize as feat_track
     from .weather_basic import featurize as feat_weather
     from .history_form import featurize as feat_history
+    from .practice_longrun_pre import _fit_slope, _load_session_laps
 except Exception:  # pragma: no cover
     def read_csv_if_exists(p: Path) -> pd.DataFrame:  # type: ignore
         return pd.read_csv(p) if Path(p).exists() else pd.DataFrame()
@@ -39,6 +40,10 @@ except Exception:  # pragma: no cover
     def feat_weather(ctx: dict) -> pd.DataFrame:  # type: ignore
         return pd.DataFrame()
     def feat_history(ctx: dict) -> pd.DataFrame:  # type: ignore
+        return pd.DataFrame()
+    def _fit_slope(x: pd.Series, y: pd.Series) -> float:  # type: ignore
+        return np.nan
+    def _load_session_laps(raw_dir: Path, year: int, rnd: int, session: str) -> pd.DataFrame:  # type: ignore
         return pd.DataFrame()
 
 __all__ = ["featurize"]
@@ -51,14 +56,30 @@ def _asof_mask(races: pd.DataFrame, year: int, rnd: int) -> pd.Series:
     return (y < int(year)) | ((y == int(year)) & (r < int(rnd)))
 
 
-def _list_prev_races(races: pd.DataFrame, year: int, rnd: int, prevN: int) -> List[Tuple[int,int]]:
-    if races is None or races.empty:
-        return []
-    past = races.loc[_asof_mask(races, year, rnd), ["year","round"]].dropna()
-    if past.empty:
-        return []
-    past = past.astype(int).sort_values(["year","round"]).tail(int(prevN))
-    return list(map(tuple, past.values.tolist()))
+def _scan_available_rounds(raw_dir: Path) -> List[Tuple[int, int]]:
+    found = set()
+    for pat in ("laps_*.csv", "results_*.csv", "meta_*.csv", "stints_*.csv"):
+        for p in raw_dir.glob(pat):
+            m = re.search(r"(\d{4})_(\d{1,2})", p.stem)
+            if m:
+                found.add((int(m.group(1)), int(m.group(2))))
+    return sorted(found)
+
+
+def _list_prev_races(raw_dir: Path, races: pd.DataFrame, year: int, rnd: int, prevN: int) -> List[Tuple[int,int]]:
+    rows: List[Tuple[int, int]] = []
+    if races is not None and not races.empty and {"year", "round"}.issubset(races.columns):
+        past = races.loc[_asof_mask(races, year, rnd), ["year","round"]].dropna()
+        if not past.empty:
+            rows.extend(map(tuple, past.astype(int).values.tolist()))
+    if len(rows) < int(prevN):
+        rows.extend(
+            (y, r)
+            for (y, r) in _scan_available_rounds(raw_dir)
+            if (y < int(year)) or (y == int(year) and r < int(rnd))
+        )
+    deduped = sorted({(int(y), int(r)) for (y, r) in rows}, key=lambda x: (x[0], x[1]))
+    return deduped[-int(prevN):]
 
 
 def _slugify(s: str) -> str:
@@ -137,7 +158,7 @@ def _load_stints(raw_dir: Path, y: int, r: int) -> pd.DataFrame:
 
 def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.DataFrame:
     if laps is None or laps.empty:
-        return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound"])  
+        return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound","Stint"])  
     df = laps.copy()
                            
     comp_col = None
@@ -145,7 +166,7 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
         if c in df.columns:
             comp_col = c; break
     if comp_col is None:
-        return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound"])  
+        return pd.DataFrame(columns=["raceId","Driver","lap","milliseconds","Compound","Stint"])  
     m = {"SOFT":"S","MEDIUM":"M","HARD":"H","Soft":"S","Medium":"M","Hard":"H","S":"S","M":"M","H":"H"}
     df["compound_norm"] = df[comp_col].astype(str).map(lambda x: m.get(x, np.nan))
     df = df.dropna(subset=["compound_norm"]).copy()
@@ -165,8 +186,9 @@ def _clean_laps_with_compound(laps: pd.DataFrame, pits: pd.DataFrame) -> pd.Data
         "lap": pd.to_numeric(df["lap"], errors="coerce").astype("Int64"),
         "milliseconds": pd.to_numeric(df["milliseconds"], errors="coerce"),
         "Compound": df["compound_norm"].astype(str),
+        "Stint": pd.to_numeric(df["Stint"], errors="coerce").astype("Int64") if "Stint" in df.columns else pd.Series(1, index=df.index, dtype="Int64"),
     })
-    return out[["raceId","Driver","lap","milliseconds","Compound"]]
+    return out[["raceId","Driver","lap","milliseconds","Compound","Stint"]]
 
 
                                                                         
@@ -226,6 +248,46 @@ def _pace_deltas_per_race(df: pd.DataFrame) -> pd.DataFrame:
     return med[["raceId","d_SM_s","d_MH_s"]]
 
 
+def _deg_from_race_laps(df: pd.DataFrame) -> Dict[str, float]:
+    if df is None or df.empty or "Compound" not in df.columns:
+        return {}
+    work = df.copy()
+    work["lap_sec"] = pd.to_numeric(work["milliseconds"], errors="coerce") / 1000.0
+    work["Stint"] = pd.to_numeric(work.get("Stint"), errors="coerce").fillna(1).astype(int)
+    rows = []
+    for (_, drv, stint_id, comp), stint in work.groupby(["raceId", "Driver", "Stint", "Compound"], dropna=False, sort=False):
+        stint = stint.sort_values("lap")
+        if len(stint) < 5:
+            continue
+        age = pd.Series(np.arange(1, len(stint) + 1), index=stint.index, dtype=float)
+        slope = _fit_slope(age, pd.to_numeric(stint["lap_sec"], errors="coerce"))
+        if np.isfinite(slope) and slope > 0:
+            rows.append({"Compound": str(comp), "deg_s_per_lap": float(slope)})
+    if not rows:
+        return {}
+    deg = pd.DataFrame(rows).groupby("Compound", dropna=False)["deg_s_per_lap"].median()
+    return {str(k): float(v) for k, v in deg.items() if pd.notna(v)}
+
+
+def _deg_from_practice(raw_dir: Path, year: int, rnd: int, sessions: Tuple[str, ...] = ("FP3", "FP2", "FP1")) -> Dict[str, float]:
+    rows = []
+    for session in sessions:
+        laps = _load_session_laps(raw_dir, year, rnd, session)
+        if laps.empty:
+            continue
+        for (_, _, comp), stint in laps.groupby(["Driver", "Stint", "compound_norm"], dropna=False, sort=False):
+            stint = stint.sort_values("tyre_age")
+            if len(stint) < 5:
+                continue
+            slope = _fit_slope(pd.to_numeric(stint["tyre_age"], errors="coerce"), pd.to_numeric(stint["lap_sec"], errors="coerce"))
+            if np.isfinite(slope) and slope > 0:
+                rows.append({"Compound": str(comp), "deg_s_per_lap": float(slope)})
+    if not rows:
+        return {}
+    deg = pd.DataFrame(rows).groupby("Compound", dropna=False)["deg_s_per_lap"].median()
+    return {str(k): float(v) for k, v in deg.items() if pd.notna(v)}
+
+
 def _safe_scalar(df_or_series, col: Optional[str], default: float) -> float:
     try:
         if isinstance(df_or_series, pd.DataFrame):
@@ -241,7 +303,13 @@ def _safe_scalar(df_or_series, col: Optional[str], default: float) -> float:
 
 
 def _current_drivers(raw_dir: Path, year: int, rnd: int) -> List[str]:
-    for src in (f"results_{year}_{rnd}.csv", f"results_{year}_{rnd}_R.csv", f"entrylist_{year}_{rnd}_R.csv", f"entrylist_{year}_{rnd}_Q.csv"):
+    for src in (
+        f"results_{year}_{rnd}.csv",
+        f"results_{year}_{rnd}_R.csv",
+        f"results_{year}_{rnd}_Q.csv",
+        f"entrylist_{year}_{rnd}_R.csv",
+        f"entrylist_{year}_{rnd}_Q.csv",
+    ):
         df = read_csv_if_exists(raw_dir / src)
         if not df.empty:
             for c in ("Abbreviation","Driver","code","driverRef"):
@@ -263,7 +331,7 @@ def featurize(ctx: dict) -> pd.DataFrame:
     races = read_csv_if_exists(raw_dir / "races.csv")
 
                                                                                                 
-    prev = _list_prev_races(races, year, rnd, prevN=12) if not races.empty else []
+    prev = _list_prev_races(raw_dir, races, year, rnd, prevN=12)
     cur_slug = _event_slug(raw_dir, year, rnd)
     same: List[Tuple[int,int]] = []
     if prev:
@@ -311,12 +379,12 @@ def featurize(ctx: dict) -> pd.DataFrame:
 
                                                                       
     try:
-        w_now = feat_weather({**ctx, "mode": "forecast"})
+        w_now = feat_weather({**ctx, "mode": "pre_race"})
     except Exception:
         w_now = pd.DataFrame()
-    track_temp = _safe_scalar(w_now, "weather_track_temp_C", 25.0)
+    track_temp = _safe_scalar(w_now, "weather_pre_track_temp_mean", 25.0)
     if not np.isfinite(track_temp) or track_temp == 0:
-        track_temp = _safe_scalar(w_now, "track_temp_C", 25.0)
+        track_temp = _safe_scalar(w_now, "weather_pre_air_temp_mean", 20.0) + 5.0
 
     hist = pd.DataFrame()
     try:
@@ -324,30 +392,50 @@ def featurize(ctx: dict) -> pd.DataFrame:
     except Exception:
         hist = pd.DataFrame()
 
-    def _pick_deg(df: pd.DataFrame, keys: List[str]) -> float:
-        for k in keys:
-            if k in df.columns:
-                v = float(pd.to_numeric(df[k], errors="coerce").median())
-                if np.isfinite(v):
-                    return v
-        return np.nan
+    deg_now = _deg_from_practice(raw_dir, year, rnd)
+    deg_hist_rows: List[Dict[str, float]] = []
+    for (y, r) in use:
+        laps = _load_laps(raw_dir, y, r)
+        pits = _load_pits(raw_dir, y, r)
+        clean = _clean_laps_with_compound(laps, pits)
+        if clean.empty:
+            continue
+        deg_hist_rows.append(_deg_from_race_laps(clean))
+
+    hist_deg: Dict[str, float] = {}
+    if deg_hist_rows:
+        frame = pd.DataFrame(deg_hist_rows)
+        for comp in ("S", "M", "H"):
+            if comp in frame.columns:
+                val = pd.to_numeric(frame[comp], errors="coerce").median()
+                if pd.notna(val):
+                    hist_deg[comp] = float(val)
 
     if hist is None or hist.empty:
-        base_S = base_M = base_H = np.nan
+        field_deg = np.nan
     else:
-        base_S = _pick_deg(hist, ["avg_deg_soft_prev3", "deg_slope_hist_S", "deg_soft_prev3", "deg_slope_mean_S"]) 
-        base_M = _pick_deg(hist, ["avg_deg_medium_prev3", "deg_slope_hist_M", "deg_medium_prev3", "deg_slope_mean_M"]) 
-        base_H = _pick_deg(hist, ["avg_deg_hard_prev3", "deg_slope_hist_H", "deg_hard_prev3", "deg_slope_mean_H"]) 
-        if not np.isfinite(base_S) and not np.isfinite(base_M) and not np.isfinite(base_H):
-                                                           
-            g = _pick_deg(hist, ["deg_slope_mean", "deg_slope_hist", "deg_prev3"])
-            base_S = base_M = base_H = g if np.isfinite(g) else np.nan
+        field_deg = float(pd.to_numeric(hist.get("hist_pre_best10_pace_iqr_s"), errors="coerce").median()) if "hist_pre_best10_pace_iqr_s" in hist.columns else np.nan
+        if np.isfinite(field_deg):
+            field_deg = max(0.005, min(0.08, field_deg / 12.0))
+
+    base_S = deg_now.get("S", hist_deg.get("S", np.nan))
+    base_M = deg_now.get("M", hist_deg.get("M", np.nan))
+    base_H = deg_now.get("H", hist_deg.get("H", np.nan))
+    if not np.isfinite(base_S) and np.isfinite(field_deg):
+        base_S = field_deg * 1.10
+    if not np.isfinite(base_M) and np.isfinite(field_deg):
+        base_M = field_deg
+    if not np.isfinite(base_H) and np.isfinite(field_deg):
+        base_H = field_deg * 0.90
 
     coef = float(ctx.get("deg_temp_coef", 0.015))                    
     td = float(track_temp) - 25.0
     exp_S = base_S * (1.0 + coef * td) if np.isfinite(base_S) else np.nan
     exp_M = base_M * (1.0 + coef * td) if np.isfinite(base_M) else np.nan
     exp_H = base_H * (1.0 + coef * td) if np.isfinite(base_H) else np.nan
+    exp_S = float(np.clip(exp_S, 0.003, 0.120)) if np.isfinite(exp_S) else np.nan
+    exp_M = float(np.clip(exp_M, 0.003, 0.120)) if np.isfinite(exp_M) else np.nan
+    exp_H = float(np.clip(exp_H, 0.003, 0.120)) if np.isfinite(exp_H) else np.nan
 
                              
     drivers = _current_drivers(raw_dir, year, rnd)

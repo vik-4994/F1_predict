@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -163,8 +164,11 @@ class SmokeTests(unittest.TestCase):
         all_names = {name for name, _ in features.ALL_FEATURIZERS}
         self.assertIn("event_chaos_priors_pre", default_names)
         self.assertIn("practice_longrun_pre", default_names)
+        self.assertIn("practice_readiness_pre", default_names)
         self.assertIn("practice_compound_pre", default_names)
         self.assertIn("weekend_team_delta_pre", default_names)
+        self.assertIn("quali_evolution_pre", default_names)
+        self.assertIn("weekend_field_form_pre", default_names)
         self.assertIn("sprint_weekend_pre", default_names)
         self.assertIn("telemetry_efficiency_pre", default_names)
         self.assertIn("quali_execution_pre", default_names)
@@ -213,6 +217,54 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(load_roster_drivers(raw_dir, 2025, 1), ["NOR", "PIA", "VER"])
             self.assertEqual(resolve_official_track_name(raw_dir, 2025, 1), "Australian Grand Prix")
 
+    def test_scenario_builder_future_mode_falls_back_to_latest_roster(self) -> None:
+        from src.scenario_builder import (
+            FUTURE_SAFE_MODULES,
+            build_scenario_features,
+            load_latest_known_roster_drivers,
+            resolve_scenario_mode,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR", "PIA", "VER"]}).to_csv(raw_dir / "entrylist_2025_24_Q.csv", index=False)
+            pd.DataFrame(
+                [{"round": 1, "EventName": "Australian Grand Prix"}, {"round": 2, "EventName": "Chinese Grand Prix"}]
+            ).to_csv(raw_dir / "schedule_2026.csv", index=False)
+
+            self.assertEqual(load_latest_known_roster_drivers(raw_dir, 2026, 2), ["NOR", "PIA", "VER"])
+            self.assertEqual(resolve_scenario_mode(raw_dir, 2026, 2, "auto"), "future")
+
+            captured: dict[str, object] = {}
+
+            def _fake_featurize(ctx, modules=None, how="outer"):
+                captured["ctx"] = ctx
+                captured["modules"] = modules
+                return pd.DataFrame({"Driver": ["NOR", "PIA", "VER"], "hist_pre_hist_n": [8.0, 8.0, 8.0]})
+
+            with mock.patch("src.scenario_builder.featurize_pre", side_effect=_fake_featurize):
+                df, track_name, roster = build_scenario_features(
+                    raw_dir,
+                    2026,
+                    2,
+                    scenario_mode="future",
+                )
+
+            self.assertEqual(track_name, "Chinese Grand Prix")
+            self.assertEqual(roster, ["NOR", "PIA", "VER"])
+            self.assertEqual(df["Driver"].tolist(), ["NOR", "PIA", "VER"])
+            self.assertEqual(captured["modules"], FUTURE_SAFE_MODULES)
+            self.assertEqual(captured["ctx"]["scenario_mode"], "future")
+
+    def test_scenario_builder_auto_prefers_observed_when_weekend_raw_exists(self) -> None:
+        from src.scenario_builder import has_observed_weekend_data, resolve_scenario_mode
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR", "PIA"]}).to_csv(raw_dir / "results_2026_1_Q.csv", index=False)
+            self.assertTrue(has_observed_weekend_data(raw_dir, 2026, 1))
+            self.assertEqual(resolve_scenario_mode(raw_dir, 2026, 1, "auto"), "observed")
+
     def test_export_schedule_round_resolution_uses_completed_sessions(self) -> None:
         sched = pd.DataFrame(
             {
@@ -241,6 +293,259 @@ class SmokeTests(unittest.TestCase):
             now_utc=pd.Timestamp("2025-03-24T00:00:00Z"),
         )
         self.assertEqual(latest, [2])
+
+    def test_export_one_session_keeps_partial_outputs_when_results_unavailable(self) -> None:
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.event = {
+                    "EventDate": pd.Timestamp("2026-03-08"),
+                    "RoundNumber": 1,
+                    "EventName": "Australian Grand Prix",
+                    "OfficialEventName": "FORMULA 1 AUSTRALIAN GRAND PRIX 2026",
+                    "Location": "Melbourne",
+                    "Country": "Australia",
+                    "EventFormat": "conventional",
+                }
+                self.f1_api_support = True
+                self.name = "Practice 3"
+                self.date = pd.Timestamp("2026-03-07T03:00:00Z")
+                self.session_start_time = pd.Timestamp("2026-03-07T03:00:00Z")
+                self.t0_date = pd.Timestamp("2026-03-07T03:00:00Z")
+                self.api_path = "/static/2026/1/FP3"
+                self.drivers = ["4"]
+                self.laps = pd.DataFrame(
+                    {
+                        "Driver": ["NOR"],
+                        "DriverNumber": ["4"],
+                        "LapNumber": [1],
+                        "LapTime": ["0 days 00:01:30.000000"],
+                    }
+                )
+                self._weather = pd.DataFrame(
+                    {
+                        "Time": ["0 days 00:01:00"],
+                        "AirTemp": [24.0],
+                        "TrackTemp": [36.0],
+                    }
+                )
+
+            def load(self, **_kwargs) -> None:
+                return None
+
+            def get_driver(self, drv):
+                return {
+                    "DriverNumber": str(drv),
+                    "Abbreviation": "NOR",
+                    "BroadcastName": "L NORRIS",
+                    "TeamName": "McLaren",
+                    "FirstName": "Lando",
+                    "LastName": "Norris",
+                }
+
+            @property
+            def weather_data(self):
+                return self._weather
+
+            @property
+            def results(self):
+                raise RuntimeError("The data you are trying to access has not been loaded yet. See `Session.load`")
+
+            @property
+            def session_status(self):
+                raise RuntimeError("not loaded")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            with mock.patch.object(self.export_fastf1.fastf1, "get_session", return_value=_FakeSession()):
+                res = self.export_fastf1.export_one_session(2026, 1, "FP3", out_dir, telemetry_stride=1, driver_limit=None)
+
+            self.assertTrue(str(res["status"]).startswith("ok_with_warnings"))
+            self.assertTrue((out_dir / "laps_2026_1_FP3.csv").exists())
+            self.assertTrue((out_dir / "meta_2026_1_FP3.csv").exists())
+            self.assertTrue((out_dir / "entrylist_2026_1_FP3.csv").exists())
+            self.assertTrue((out_dir / "weather_2026_1_FP3.csv").exists())
+            self.assertFalse((out_dir / "results_2026_1_FP3.csv").exists())
+
+    def test_export_one_session_keeps_meta_when_laps_unavailable(self) -> None:
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.event = {
+                    "EventDate": pd.Timestamp("2026-03-08"),
+                    "RoundNumber": 1,
+                    "EventName": "Australian Grand Prix",
+                    "OfficialEventName": "FORMULA 1 AUSTRALIAN GRAND PRIX 2026",
+                    "Location": "Melbourne",
+                    "Country": "Australia",
+                    "EventFormat": "conventional",
+                }
+                self.f1_api_support = True
+                self.name = "Practice 2"
+                self.date = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.session_start_time = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.t0_date = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.api_path = "/static/2026/1/FP2"
+                self.drivers = ["4", "1"]
+                self._weather = pd.DataFrame({"Time": ["0 days 00:01:00"], "AirTemp": [23.0]})
+
+            def load(self, **_kwargs) -> None:
+                return None
+
+            def get_driver(self, drv):
+                return {
+                    "DriverNumber": str(drv),
+                    "Abbreviation": "NOR" if str(drv) == "4" else "VER",
+                    "BroadcastName": "L NORRIS" if str(drv) == "4" else "M VERSTAPPEN",
+                    "TeamName": "McLaren" if str(drv) == "4" else "Red Bull Racing",
+                    "FirstName": "Lando" if str(drv) == "4" else "Max",
+                    "LastName": "Norris" if str(drv) == "4" else "Verstappen",
+                }
+
+            @property
+            def weather_data(self):
+                return self._weather
+
+            @property
+            def laps(self):
+                raise RuntimeError("The data you are trying to access has not been loaded yet. See `Session.load`")
+
+            @property
+            def results(self):
+                return pd.DataFrame({"DriverNumber": ["4", "1"], "Abbreviation": ["NOR", "VER"]})
+
+            @property
+            def session_status(self):
+                return pd.DataFrame()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            with mock.patch.object(self.export_fastf1.fastf1, "get_session", return_value=_FakeSession()):
+                res = self.export_fastf1.export_one_session(2026, 1, "FP2", out_dir, telemetry_stride=1, driver_limit=None)
+
+            self.assertTrue(str(res["status"]).startswith("partial_missing_laps"))
+            self.assertEqual(res["failed_step"], "laps")
+            self.assertTrue((out_dir / "meta_2026_1_FP2.csv").exists())
+            self.assertTrue((out_dir / "entrylist_2026_1_FP2.csv").exists())
+            self.assertTrue((out_dir / "weather_2026_1_FP2.csv").exists())
+            self.assertTrue((out_dir / "results_2026_1_FP2.csv").exists())
+            self.assertFalse((out_dir / "laps_2026_1_FP2.csv").exists())
+
+    def test_export_one_session_builds_laps_from_low_level_fastf1_api(self) -> None:
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.event = {
+                    "EventDate": pd.Timestamp("2026-03-08"),
+                    "RoundNumber": 1,
+                    "EventName": "Australian Grand Prix",
+                    "OfficialEventName": "FORMULA 1 AUSTRALIAN GRAND PRIX 2026",
+                    "Location": "Melbourne",
+                    "Country": "Australia",
+                    "EventFormat": "conventional",
+                }
+                self.f1_api_support = True
+                self.name = "Practice 2"
+                self.date = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.session_start_time = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.t0_date = pd.Timestamp("2026-03-06T03:00:00Z")
+                self.api_path = "/static/2026/2026-03-06_Australian_Grand_Prix/2026-03-06_Practice_2/"
+                self.drivers = ["4"]
+                self._weather = pd.DataFrame({"Time": ["0 days 00:01:00"], "AirTemp": [23.0]})
+
+            def load(self, **_kwargs) -> None:
+                return None
+
+            def get_driver(self, drv):
+                return {
+                    "DriverNumber": str(drv),
+                    "Abbreviation": "NOR",
+                    "BroadcastName": "L NORRIS",
+                    "TeamName": "McLaren",
+                    "FirstName": "Lando",
+                    "LastName": "Norris",
+                }
+
+            @property
+            def weather_data(self):
+                return self._weather
+
+            @property
+            def laps(self):
+                raise RuntimeError("The data you are trying to access has not been loaded yet. See `Session.load`")
+
+            @property
+            def results(self):
+                return pd.DataFrame({"DriverNumber": ["4"], "Abbreviation": ["NOR"]})
+
+            @property
+            def session_status(self):
+                return pd.DataFrame()
+
+        low_level_laps = pd.DataFrame(
+            {
+                "Time": [pd.Timedelta(minutes=1, seconds=30)],
+                "Driver": ["4"],
+                "LapTime": [pd.Timedelta(minutes=1, seconds=30)],
+                "NumberOfLaps": [1],
+                "PitOutTime": [pd.NaT],
+                "PitInTime": [pd.NaT],
+                "Sector1Time": [pd.Timedelta(seconds=30)],
+                "Sector2Time": [pd.Timedelta(seconds=30)],
+                "Sector3Time": [pd.Timedelta(seconds=30)],
+                "Sector1SessionTime": [pd.Timedelta(seconds=30)],
+                "Sector2SessionTime": [pd.Timedelta(seconds=60)],
+                "Sector3SessionTime": [pd.Timedelta(seconds=90)],
+                "SpeedI1": [280.0],
+                "SpeedI2": [285.0],
+                "SpeedFL": [290.0],
+                "SpeedST": [295.0],
+                "IsPersonalBest": [True],
+            }
+        )
+        app_data = pd.DataFrame(
+            {
+                "Time": [pd.Timedelta(minutes=1, seconds=30)],
+                "Driver": ["4"],
+                "Stint": [0],
+                "Compound": ["MEDIUM"],
+                "New": [True],
+                "StartLaps": [0],
+            }
+        )
+        driver_info = {
+            "4": {
+                "RacingNumber": "4",
+                "Tla": "NOR",
+                "BroadcastName": "L NORRIS",
+                "TeamName": "McLaren",
+                "FirstName": "Lando",
+                "LastName": "Norris",
+            }
+        }
+        session_status = {"Time": [pd.Timedelta(0)], "Status": ["Started"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            with mock.patch.object(self.export_fastf1.fastf1, "get_session", return_value=_FakeSession()), \
+                mock.patch.object(self.export_fastf1.ffapi, "_extended_timing_data", return_value=(low_level_laps, pd.DataFrame(), [])), \
+                mock.patch.object(self.export_fastf1.ffapi, "timing_app_data", return_value=app_data), \
+                mock.patch.object(self.export_fastf1.ffapi, "driver_info", return_value=driver_info), \
+                mock.patch.object(self.export_fastf1.ffapi, "session_status_data", return_value=session_status):
+                res = self.export_fastf1.export_one_session(2026, 1, "FP2", out_dir, telemetry_stride=1, driver_limit=None)
+
+            self.assertTrue(str(res["status"]).startswith("ok_with_warnings"))
+            self.assertIsNone(res["failed_step"])
+            self.assertTrue((out_dir / "laps_2026_1_FP2.csv").exists())
+
+    def test_simulate_season_resolve_rounds_can_include_future_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"round": [1, 2, 3], "EventName": ["A", "B", "C"]}).to_csv(raw_dir / "schedule_2026.csv", index=False)
+            pd.DataFrame({"Abbreviation": ["NOR", "PIA"]}).to_csv(raw_dir / "entrylist_2026_1_Q.csv", index=False)
+
+            observed_only = self.simulate_season.resolve_rounds(raw_dir, 2026, None, allow_future=False)
+            allow_future = self.simulate_season.resolve_rounds(raw_dir, 2026, None, allow_future=True)
+
+            self.assertEqual(observed_only, [1])
+            self.assertEqual(allow_future, [1, 2, 3])
 
     def test_feature_audit_reports_dead_group(self) -> None:
         df = pd.DataFrame(
@@ -279,6 +584,49 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(int(agg["weather_pre_records_n"]), 2)
         self.assertAlmostEqual(float(agg["weather_pre_air_temp_mean"]), 21.0)
         self.assertAlmostEqual(float(agg["weather_pre_rain_prob_p75"]), 0.75)
+
+    def test_weather_basic_falls_back_to_latest_prerace_session_weather(self) -> None:
+        import importlib
+
+        weather_basic = importlib.import_module("src.features.weather_basic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR", "VER"]}).to_csv(raw_dir / "results_2025_1_Q.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "year": 2025,
+                        "round": 1,
+                        "Session1": "Practice 1",
+                        "Session1DateUtc": "2025-03-14T01:00:00Z",
+                        "Session2": "Practice 2",
+                        "Session2DateUtc": "2025-03-14T05:00:00Z",
+                        "Session3": "Practice 3",
+                        "Session3DateUtc": "2025-03-15T01:00:00Z",
+                        "Session4": "Qualifying",
+                        "Session4DateUtc": "2025-03-15T05:00:00Z",
+                        "Session5": "Race",
+                        "Session5DateUtc": "2025-03-16T04:00:00Z",
+                    }
+                ]
+            ).to_csv(raw_dir / "schedule_2025.csv", index=False)
+            pd.DataFrame(
+                {
+                    "Time": ["0 days 00:10:00", "0 days 00:40:00", "0 days 00:55:00"],
+                    "AirTemp": [28.0, 30.0, 32.0],
+                    "Humidity": [50.0, 45.0, 40.0],
+                    "TrackTemp": [36.0, 39.0, 41.0],
+                    "Rainfall": [False, False, False],
+                    "WindSpeed": [3.0, 4.0, 5.0],
+                }
+            ).to_csv(raw_dir / "weather_2025_1_Q.csv", index=False)
+
+            out = weather_basic.featurize({"raw_dir": raw_dir, "year": 2025, "round": 1})
+            self.assertEqual(out["Driver"].tolist(), ["NOR", "VER"])
+            self.assertEqual(int(out["weather_pre_records_n"].iloc[0]), 2)
+            self.assertAlmostEqual(float(out["weather_pre_air_temp_mean"].iloc[0]), 31.0)
+            self.assertAlmostEqual(float(out["weather_pre_track_temp_mean"].iloc[0]), 40.0)
 
     def test_simulate_season_points_assignment(self) -> None:
         df = pd.DataFrame(
@@ -379,6 +727,69 @@ class SmokeTests(unittest.TestCase):
             self.assertTrue((out["chaos_pre_wet_start_rate"] > 0.6).all())
             self.assertTrue((out["chaos_pre_delayed_start_rate"] > 0.6).all())
             self.assertTrue((out["chaos_pre_index"] > 0.0).all())
+
+    def test_track_onehot_searches_full_history_for_same_track(self) -> None:
+        from src.features.track_onehot import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR", "VER"]}).to_csv(raw_dir / "results_2025_1_Q.csv", index=False)
+
+            for rnd in range(1, 25):
+                name = "Australian Grand Prix" if rnd == 3 else f"Other Grand Prix {rnd}"
+                pd.DataFrame([{"Year": 2024, "Round": rnd, "Session": "R", "EventName": name, "Location": f"Loc {rnd}"}]).to_csv(
+                    raw_dir / f"meta_2024_{rnd}.csv",
+                    index=False,
+                )
+                pd.DataFrame(
+                    {
+                        "Abbreviation": ["NOR", "VER"],
+                        "Position": [1 if rnd == 3 else 5, 2 if rnd == 3 else 6],
+                        "GridPosition": [1, 2],
+                        "Status": ["Finished", "Finished"],
+                        "Points": [25, 18],
+                    }
+                ).to_csv(raw_dir / f"results_2024_{rnd}.csv", index=False)
+
+            pd.DataFrame([{"Year": 2025, "Round": 1, "Session": "R", "EventName": "Australian Grand Prix", "Location": "Melbourne"}]).to_csv(
+                raw_dir / "meta_2025_1.csv",
+                index=False,
+            )
+
+            out = featurize({"raw_dir": raw_dir, "year": 2025, "round": 1, "include_onehot": True})
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            ver = out.loc[out["Driver"] == "VER"].iloc[0]
+            self.assertEqual(int(nor["track_same_hist_n"]), 1)
+            self.assertEqual(int(ver["track_same_hist_n"]), 1)
+            self.assertAlmostEqual(float(nor["track_same_finish_p50"]), 1.0)
+            self.assertAlmostEqual(float(ver["track_same_finish_p50"]), 2.0)
+
+    def test_missing_rounds_from_schedule_detects_partial_raw_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            pd.DataFrame({"x": [1]}).to_csv(out_dir / "laps_2025_1.csv", index=False)
+            pd.DataFrame({"x": [1]}).to_csv(out_dir / "laps_2025_1_Q.csv", index=False)
+            pd.DataFrame({"x": [1]}).to_csv(out_dir / "laps_2025_2.csv", index=False)
+            pd.DataFrame({"x": [1]}).to_csv(out_dir / "laps_2025_3.csv", index=False)
+            pd.DataFrame({"x": [1]}).to_csv(out_dir / "laps_2025_3_SQ.csv", index=False)
+            sched = pd.DataFrame(
+                {
+                    "year": [2025, 2025, 2025],
+                    "RoundNumber": [1, 2, 3],
+                    "Session4": ["Qualifying", "Qualifying", "Sprint Shootout"],
+                    "Session4DateUtc": ["2025-03-15T05:00:00Z", "2025-03-22T05:00:00Z", "2025-04-05T05:00:00Z"],
+                    "Session5": ["Race", "Race", "Sprint"],
+                    "Session5DateUtc": ["2025-03-16T04:00:00Z", "2025-03-23T04:00:00Z", "2025-04-06T04:00:00Z"],
+                }
+            )
+            missing = self.export_fastf1.missing_rounds_from_schedule(
+                sched,
+                out_dir,
+                ["R", "Q"],
+                completed_only=True,
+                now_utc=pd.Timestamp("2025-04-07T00:00:00Z"),
+            )
+            self.assertEqual(missing, [2])
 
     def test_practice_longrun_module_extracts_current_weekend_dry_runs(self) -> None:
         from src.features.practice_longrun_pre import featurize
@@ -516,6 +927,68 @@ class SmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(ver["prac_cmp_pre_crossover_sm_s"]), 1.0, places=6)
             self.assertTrue(pd.isna(nor["prac_cmp_pre_h_best_s"]))
 
+    def test_practice_readiness_module_extracts_running_quality(self) -> None:
+        from src.features.practice_readiness_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame(
+                {
+                    "Abbreviation": ["VER", "PER", "NOR", "PIA"],
+                    "TeamName": ["Red Bull Racing", "Red Bull Racing", "McLaren", "McLaren"],
+                }
+            ).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+
+            pd.DataFrame(
+                {
+                    "Driver": ["VER"] * 4 + ["PER"] * 2 + ["NOR"] * 3 + ["PIA"] * 3,
+                    "LapTime": [
+                        "0 days 00:01:35.0",
+                        "0 days 00:01:35.4",
+                        "0 days 00:01:35.8",
+                        "0 days 00:01:36.0",
+                        "0 days 00:01:35.2",
+                        "0 days 00:01:36.0",
+                        "0 days 00:01:34.8",
+                        "0 days 00:01:35.0",
+                        "0 days 00:01:35.1",
+                        "0 days 00:01:35.0",
+                        "0 days 00:01:35.2",
+                        "0 days 00:01:35.3",
+                    ],
+                    "IsAccurate": [True, True, True, False, True, False, True, True, True, True, True, True],
+                    "TrackStatus": ["1"] * 12,
+                    "Compound": ["MEDIUM"] * 12,
+                }
+            ).to_csv(raw_dir / "laps_2025_3_FP2.csv", index=False)
+
+            pd.DataFrame(
+                {
+                    "Driver": ["VER"] * 3 + ["NOR"] * 3 + ["PIA"] * 1,
+                    "LapTime": [
+                        "0 days 00:01:34.9",
+                        "0 days 00:01:35.1",
+                        "0 days 00:01:35.3",
+                        "0 days 00:01:34.7",
+                        "0 days 00:01:34.8",
+                        "0 days 00:01:35.0",
+                        "0 days 00:01:35.2",
+                    ],
+                    "IsAccurate": [True, True, True, True, True, True, False],
+                    "TrackStatus": ["1"] * 7,
+                    "Compound": ["SOFT"] * 7,
+                }
+            ).to_csv(raw_dir / "laps_2025_3_FP3.csv", index=False)
+
+            out = featurize({"raw_dir": raw_dir, "year": 2025, "round": 3})
+            self.assertFalse(out.empty)
+            ver = out.loc[out["Driver"] == "VER"].iloc[0]
+            per = out.loc[out["Driver"] == "PER"].iloc[0]
+            self.assertEqual(float(ver["ready_pre_sessions_seen_n"]), 2.0)
+            self.assertEqual(float(per["ready_pre_missing_fp3_flag"]), 1.0)
+            self.assertTrue(float(ver["ready_pre_total_laps_tm_delta"]) > 0.0)
+            self.assertTrue(float(per["ready_pre_issue_index"]) > float(ver["ready_pre_issue_index"]))
+
     def test_sprint_weekend_module_extracts_current_sprint_signals(self) -> None:
         from src.features.sprint_weekend_pre import featurize
 
@@ -623,6 +1096,49 @@ class SmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(ver["qexec_pre_gap_to_tm_s"]), -0.7, places=6)
             self.assertEqual(float(per["qexec_pre_stage_reached"]), 3.0)
             self.assertTrue(float(ver["qexec_pre_ideal_lap_gap_s"]) >= 0.0)
+
+    def test_quali_evolution_module_extracts_timing_and_window_signals(self) -> None:
+        from src.features.quali_evolution_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["VER", "PER", "NOR", "PIA"]}).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+            pd.DataFrame(
+                {
+                    "Driver": ["VER", "VER", "PER", "PER", "NOR", "NOR", "PIA", "PIA"],
+                    "LapTime": [
+                        "0 days 00:01:16.000000",
+                        "0 days 00:01:15.200000",
+                        "0 days 00:01:16.500000",
+                        "0 days 00:01:15.900000",
+                        "0 days 00:01:15.800000",
+                        "0 days 00:01:15.100000",
+                        "0 days 00:01:16.100000",
+                        "0 days 00:01:15.400000",
+                    ],
+                    "Time": [
+                        "0 days 00:05:00",
+                        "0 days 00:12:00",
+                        "0 days 00:06:00",
+                        "0 days 00:13:00",
+                        "0 days 00:10:00",
+                        "0 days 00:17:00",
+                        "0 days 00:11:00",
+                        "0 days 00:18:00",
+                    ],
+                    "TrackStatus": ["1"] * 8,
+                    "IsAccurate": [True] * 8,
+                    "Deleted": [False] * 8,
+                }
+            ).to_csv(raw_dir / "laps_2025_3_Q.csv", index=False)
+
+            out = featurize({"raw_dir": raw_dir, "year": 2025, "round": 3})
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            per = out.loc[out["Driver"] == "PER"].iloc[0]
+            self.assertTrue(float(nor["qevo_pre_best_lap_progress_pct"]) > float(per["qevo_pre_best_lap_progress_pct"]))
+            self.assertTrue(float(nor["qevo_pre_timing_luck_s"]) >= 0.0)
+            self.assertTrue(float(nor["qevo_pre_window_rank_pct"]) >= 0.0)
 
     def test_telemetry_efficiency_module_extracts_weekend_metrics(self) -> None:
         from src.features.telemetry_efficiency_pre import featurize
@@ -791,6 +1307,123 @@ class SmokeTests(unittest.TestCase):
             self.assertTrue(pd.notna(ver["wknd_pre_q_sector_tm_delta_std_s"]))
             self.assertTrue(pd.notna(ver["wknd_pre_prac_longrun_tm_delta_s"]))
 
+    def test_weekend_field_form_module_extracts_cross_field_ranks(self) -> None:
+        from src.features.weekend_field_form_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame(
+                {
+                    "Abbreviation": ["VER", "PER", "NOR", "PIA"],
+                    "TeamName": ["Red Bull Racing", "Red Bull Racing", "McLaren", "McLaren"],
+                    "Position": [2, 4, 1, 3],
+                    "Q1": ["0 days 00:01:16.0", "0 days 00:01:16.5", "0 days 00:01:15.7", "0 days 00:01:16.0"],
+                    "Q2": ["0 days 00:01:15.6", "0 days 00:01:16.1", "0 days 00:01:15.3", "0 days 00:01:15.7"],
+                    "Q3": ["0 days 00:01:15.2", "0 days 00:01:15.9", "0 days 00:01:15.0", "0 days 00:01:15.4"],
+                }
+            ).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+
+            pd.DataFrame(
+                {
+                    "Driver": ["VER", "VER", "PER", "PER", "NOR", "NOR", "PIA", "PIA"],
+                    "LapTime": [
+                        "0 days 00:01:15.5",
+                        "0 days 00:01:15.2",
+                        "0 days 00:01:16.1",
+                        "0 days 00:01:15.9",
+                        "0 days 00:01:15.3",
+                        "0 days 00:01:15.0",
+                        "0 days 00:01:15.7",
+                        "0 days 00:01:15.4",
+                    ],
+                    "Time": [
+                        "0 days 00:05:00",
+                        "0 days 00:12:00",
+                        "0 days 00:06:00",
+                        "0 days 00:13:00",
+                        "0 days 00:08:00",
+                        "0 days 00:15:00",
+                        "0 days 00:09:00",
+                        "0 days 00:16:00",
+                    ],
+                    "Sector1Time": ["0 days 00:00:25.1"] * 8,
+                    "Sector2Time": ["0 days 00:00:17.2"] * 8,
+                    "Sector3Time": ["0 days 00:00:33.2"] * 8,
+                    "TrackStatus": ["1"] * 8,
+                    "IsAccurate": [True] * 8,
+                    "Deleted": [False] * 8,
+                }
+            ).to_csv(raw_dir / "laps_2025_3_Q.csv", index=False)
+
+            pd.DataFrame(
+                {
+                    "Driver": ["VER"] * 5 + ["PER"] * 5 + ["NOR"] * 5 + ["PIA"] * 5,
+                    "LapTime": [
+                        "0 days 00:01:35.0",
+                        "0 days 00:01:35.2",
+                        "0 days 00:01:35.4",
+                        "0 days 00:01:35.6",
+                        "0 days 00:01:35.8",
+                        "0 days 00:01:35.5",
+                        "0 days 00:01:35.7",
+                        "0 days 00:01:36.0",
+                        "0 days 00:01:36.2",
+                        "0 days 00:01:36.4",
+                        "0 days 00:01:34.7",
+                        "0 days 00:01:34.9",
+                        "0 days 00:01:35.1",
+                        "0 days 00:01:35.3",
+                        "0 days 00:01:35.5",
+                        "0 days 00:01:34.9",
+                        "0 days 00:01:35.1",
+                        "0 days 00:01:35.3",
+                        "0 days 00:01:35.5",
+                        "0 days 00:01:35.7",
+                    ],
+                    "Stint": [1] * 20,
+                    "Compound": ["MEDIUM"] * 20,
+                    "TyreLife": [2, 3, 4, 5, 6] * 4,
+                    "TrackStatus": ["1"] * 20,
+                }
+            ).to_csv(raw_dir / "laps_2025_3_FP2.csv", index=False)
+
+            out = featurize({"raw_dir": raw_dir, "year": 2025, "round": 3})
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            per = out.loc[out["Driver"] == "PER"].iloc[0]
+            self.assertTrue(float(nor["field_pre_q_rank_pct"]) > float(per["field_pre_q_rank_pct"]))
+            self.assertTrue(float(nor["field_pre_combo_rank_pct"]) > float(per["field_pre_combo_rank_pct"]))
+            self.assertTrue(float(nor["field_pre_available_scores_n"]) >= 3.0)
+
+    def test_tyre_module_builds_expected_deg_from_practice(self) -> None:
+        from src.features.tyre_priors_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR", "VER"]}).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+            rows = []
+            for driver, base in (("NOR", 35.0), ("VER", 34.5)):
+                for comp, bump in (("SOFT", 0.00), ("MEDIUM", 0.35), ("HARD", 0.70)):
+                    for tyre_age in range(2, 8):
+                        total = base + bump + tyre_age * 0.20
+                        rows.append(
+                            {
+                                "Driver": driver,
+                                "LapTime": f"0 days 00:01:{total:06.3f}",
+                                "Stint": {"SOFT": 1, "MEDIUM": 2, "HARD": 3}[comp],
+                                "Compound": comp,
+                                "TyreLife": tyre_age,
+                                "TrackStatus": "1",
+                            }
+                        )
+            pd.DataFrame(rows).to_csv(raw_dir / "laps_2025_3_FP2.csv", index=False)
+
+            out = featurize({"raw_dir": raw_dir, "year": 2025, "round": 3})
+            self.assertFalse(out.empty)
+            for col in ("expected_deg_S", "expected_deg_M", "expected_deg_H"):
+                self.assertTrue(pd.notna(out[col]).all())
+                self.assertTrue((pd.to_numeric(out[col], errors="coerce") > 0).all())
+
     def test_driver_track_cluster_module_has_signal_on_repo_data(self) -> None:
         from src.features.driver_track_cluster_pre import featurize
 
@@ -811,6 +1444,27 @@ class SmokeTests(unittest.TestCase):
         self.assertFalse(df.empty)
         self.assertIn("compound_mix_priors_S", df.columns)
         self.assertIn("tyre_delta_priors_s_SM", df.columns)
+        self.assertGreater(int(df["expected_deg_S"].notna().sum()), 0)
+
+    def test_weather_basic_has_signal_on_repo_data(self) -> None:
+        from src.features.weather_basic import featurize
+
+        raw_dir = ROOT / "data" / "raw_csv"
+        if not raw_dir.exists():
+            self.skipTest("raw_csv data not available")
+        df = featurize({"raw_dir": raw_dir, "year": 2025, "round": 1})
+        self.assertFalse(df.empty)
+        self.assertGreater(int(df["weather_pre_air_temp_mean"].notna().sum()), 0)
+
+    def test_track_onehot_has_same_track_signal_on_repo_data(self) -> None:
+        from src.features.track_onehot import featurize
+
+        raw_dir = ROOT / "data" / "raw_csv"
+        if not raw_dir.exists():
+            self.skipTest("raw_csv data not available")
+        df = featurize({"raw_dir": raw_dir, "year": 2025, "round": 1})
+        self.assertFalse(df.empty)
+        self.assertGreater(int(pd.to_numeric(df["track_same_hist_n"], errors="coerce").fillna(0).max()), 0)
 
     def test_event_chaos_module_has_signal_on_repo_data(self) -> None:
         from src.features.event_chaos_priors_pre import featurize
