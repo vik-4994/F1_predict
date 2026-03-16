@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from src.scenario_builder import build_scenario_features, resolve_official_track_name, resolve_scenario_mode
 from src.frame_utils import sanitize_frame_columns
+from src.scenario_support import is_artifact_compatible, resolve_artifacts_dir
 
 if TYPE_CHECKING:
     from src.training import InferenceRunner
@@ -129,6 +130,7 @@ def pretty_print_table(df: pd.DataFrame, topk: int, cols_mode: str = "mini") -> 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser("Predict race ranking")
     ap.add_argument("--artifacts", type=str, required=True)
+    ap.add_argument("--future-artifacts", type=str, default=None, help="Optional future-compatible artifacts dir")
     ap.add_argument("--features", type=str, default=None, help="Fallback legacy features table")
     ap.add_argument("--raw-dir", type=str, default=None, help="Raw CSV directory to rebuild pre-race features for the target event")
     ap.add_argument(
@@ -407,6 +409,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     from src.training import InferenceRunner
 
     args = parse_args(argv)
+    artifacts_dir = Path(args.artifacts)
+    resolved_scenario_mode = "observed"
 
     drivers = [drv.strip() for drv in (args.drivers or "").split(",") if drv.strip()]
     track_name = str(args.track).strip() if args.track else None
@@ -452,6 +456,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         df = _build_legacy_features(Path(args.features), drivers, int(args.sim_year), int(args.sim_round))
         track_name = track_name or "unknown"
 
+    effective_artifacts_dir = resolve_artifacts_dir(
+        artifacts_dir,
+        resolved_scenario_mode,
+        future_artifacts_dir=args.future_artifacts,
+    )
+    if effective_artifacts_dir != artifacts_dir:
+        print(
+            f"[info] using future-compatible artifacts from {effective_artifacts_dir}",
+            file=sys.stderr,
+        )
+
     _apply_track_onehot(df, track_name)
     _apply_weather(df, json.loads(args.weather_json) if args.weather_json else {})
     grid_map = _parse_grid(args.grid)
@@ -460,7 +475,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     _astype_floatwise(df)
     df = sanitize_frame_columns(df.copy())
 
-    runner = InferenceRunner.from_dir(args.artifacts)
+    runner = InferenceRunner.from_dir(effective_artifacts_dir)
+    if not is_artifact_compatible(runner.artifacts.meta, resolved_scenario_mode):
+        raise SystemExit(
+            f"Artifacts at {effective_artifacts_dir} are not compatible with scenario mode '{resolved_scenario_mode}'."
+        )
     rank_df = runner.rank(
         df,
         temperature=float(args.tau),

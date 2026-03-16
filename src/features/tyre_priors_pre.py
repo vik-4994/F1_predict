@@ -407,14 +407,19 @@ def featurize(ctx: dict) -> pd.DataFrame:
         frame = pd.DataFrame(deg_hist_rows)
         for comp in ("S", "M", "H"):
             if comp in frame.columns:
-                val = pd.to_numeric(frame[comp], errors="coerce").median()
+                vals = pd.to_numeric(frame[comp], errors="coerce")
+                val = vals.median() if vals.notna().any() else np.nan
                 if pd.notna(val):
                     hist_deg[comp] = float(val)
 
     if hist is None or hist.empty:
         field_deg = np.nan
     else:
-        field_deg = float(pd.to_numeric(hist.get("hist_pre_best10_pace_iqr_s"), errors="coerce").median()) if "hist_pre_best10_pace_iqr_s" in hist.columns else np.nan
+        if "hist_pre_best10_pace_iqr_s" in hist.columns:
+            hist_iqr = pd.to_numeric(hist.get("hist_pre_best10_pace_iqr_s"), errors="coerce")
+            field_deg = float(hist_iqr.median()) if hist_iqr.notna().any() else np.nan
+        else:
+            field_deg = np.nan
         if np.isfinite(field_deg):
             field_deg = max(0.005, min(0.08, field_deg / 12.0))
 

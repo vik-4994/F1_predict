@@ -18,6 +18,7 @@ from src.scenario_builder import (
     resolve_official_track_name,
     resolve_scenario_mode,
 )
+from src.scenario_support import is_artifact_compatible, resolve_artifacts_dir
 
 POINTS_BY_RANK: Dict[int, int] = {
     1: 25,
@@ -47,6 +48,7 @@ GRID_ALIASES = [
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser("Simulate season standings from per-race predictions")
     ap.add_argument("--artifacts", type=str, required=True)
+    ap.add_argument("--future-artifacts", type=str, default=None, help="Optional future-compatible artifacts dir")
     ap.add_argument("--raw-dir", type=str, required=True)
     ap.add_argument("--year", type=int, required=True)
     ap.add_argument("--rounds", type=str, default=None, help='Optional CSV/range like "1,2,5-8"')
@@ -235,7 +237,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not rounds:
         raise SystemExit(f"No available rounds found for {args.year}")
 
-    runner = InferenceRunner.from_dir(args.artifacts)
+    base_artifacts_dir = Path(args.artifacts)
+    runners: Dict[Path, InferenceRunner] = {}
     all_preds: List[pd.DataFrame] = []
     skipped: List[str] = []
 
@@ -256,6 +259,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
         except Exception as exc:
             skipped.append(f"R{int(rnd):02d}: {exc}")
+            continue
+
+        try:
+            effective_artifacts_dir = resolve_artifacts_dir(
+                base_artifacts_dir,
+                scenario_mode,
+                future_artifacts_dir=args.future_artifacts,
+            )
+        except Exception as exc:
+            skipped.append(f"R{int(rnd):02d}: {exc}")
+            continue
+        runner = runners.get(effective_artifacts_dir)
+        if runner is None:
+            runner = InferenceRunner.from_dir(effective_artifacts_dir)
+            runners[effective_artifacts_dir] = runner
+        if not is_artifact_compatible(runner.artifacts.meta, scenario_mode):
+            skipped.append(
+                f"R{int(rnd):02d}: artifacts at {effective_artifacts_dir} are not compatible with mode '{scenario_mode}'"
+            )
             continue
 
         rank_df = runner.rank(

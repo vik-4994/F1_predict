@@ -36,12 +36,71 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Iterable, Dict, List, Tuple
+from typing import Any, Optional, Iterable, Dict, List, Tuple
 
 import pandas as pd
 import numpy as np
-import fastf1
-from fastf1 import _api as ffapi
+
+try:
+    import fastf1  # type: ignore[import-not-found]
+    from fastf1 import _api as ffapi  # type: ignore[import-not-found]
+    _FASTF1_IMPORT_ERROR: Optional[ModuleNotFoundError] = None
+except ModuleNotFoundError as exc:
+    _FASTF1_IMPORT_ERROR = exc
+
+    class _MissingCache:
+        @staticmethod
+        def enable_cache(*_args: Any, **_kwargs: Any) -> None:
+            raise ModuleNotFoundError(
+                "fastf1 is required for cache-enabled export workflows. "
+                "Install the project dependencies with `pip install -r requirements.txt`."
+            ) from _FASTF1_IMPORT_ERROR
+
+    class _MissingFastF1:
+        __version__ = ""
+        Cache = _MissingCache
+
+        @staticmethod
+        def get_session(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError(
+                "fastf1 is required for session export workflows. "
+                "Install the project dependencies with `pip install -r requirements.txt`."
+            ) from _FASTF1_IMPORT_ERROR
+
+        @staticmethod
+        def get_event_schedule(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError(
+                "fastf1 is required for schedule export workflows. "
+                "Install the project dependencies with `pip install -r requirements.txt`."
+            ) from _FASTF1_IMPORT_ERROR
+
+    class _MissingFastF1Api:
+        @staticmethod
+        def driver_info(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError("fastf1 is required for low-level export API access.") from _FASTF1_IMPORT_ERROR
+
+        @staticmethod
+        def session_status_data(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError("fastf1 is required for low-level export API access.") from _FASTF1_IMPORT_ERROR
+
+        @staticmethod
+        def _extended_timing_data(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError("fastf1 is required for low-level export API access.") from _FASTF1_IMPORT_ERROR
+
+        @staticmethod
+        def timing_app_data(*_args: Any, **_kwargs: Any) -> Any:
+            raise ModuleNotFoundError("fastf1 is required for low-level export API access.") from _FASTF1_IMPORT_ERROR
+
+    fastf1 = _MissingFastF1()
+    ffapi = _MissingFastF1Api()
+
+
+def _require_fastf1() -> None:
+    if _FASTF1_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "fastf1 is not installed. Install the project dependencies with "
+            "`pip install -r requirements.txt` before running raw-data export commands."
+        ) from _FASTF1_IMPORT_ERROR
 
 
                                
@@ -844,6 +903,7 @@ def run_export(
     latest_only: bool,
     lookback_rounds: Optional[int],
 ) -> List[Dict[str, object]]:
+    _require_fastf1()
     years = sorted(set(int(y) for y in years))
     sessions = [str(s).upper() for s in sessions]
     setup_dirs(out_dir, cache_dir)

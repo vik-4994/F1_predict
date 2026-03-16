@@ -17,6 +17,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.frame_utils import filter_feature_cols
+from src.scenario_support import (
+    FUTURE_FEATURE_PROFILE,
+    FUTURE_MODE,
+    normalize_feature_profile,
+    select_feature_profile_cols,
+)
 
                                      
 from src.training import (
@@ -38,8 +44,7 @@ from src.training import (
                                               
                                                                                         
 class MLPScorer(nn.Module):
-    """Лёгкий MLP: [in] -> Linear/ReLU/Dropout * L -> Linear(1) -> scores[N]
-    """
+    """Lightweight MLP scorer: [in] -> Linear/ReLU/Dropout * L -> Linear(1)."""
     def __init__(self, in_dim: int, hidden: Sequence[int], dropout: float = 0.10):
         super().__init__()
         layers: List[nn.Module] = []
@@ -72,6 +77,13 @@ def _apply_feature_ablation(feature_cols: List[str], cfg: TrainConfig) -> tuple[
     return kept, dropped
 
 
+def _apply_feature_profile(feature_cols: List[str], cfg: TrainConfig) -> tuple[List[str], List[str]]:
+    profile = normalize_feature_profile(cfg.feature_profile)
+    kept = select_feature_profile_cols(feature_cols, profile)
+    dropped = [col for col in feature_cols if col not in set(kept)]
+    return kept, dropped
+
+
                                                                                         
                       
                                                                                         
@@ -86,7 +98,7 @@ def main() -> None:
                         
     F, T = load_all(cfg.features_path, cfg.targets_path)
     if F.empty or T.empty:
-        log("❌ Нет данных: проверьте пути --features / --targets")
+        log("No data loaded. Check --features and --targets paths.")
         return
 
                                           
@@ -98,7 +110,19 @@ def main() -> None:
 
                                             
     feature_cols = select_feature_cols(TR)
+    original_feature_count = len(feature_cols)
+    feature_cols, profile_dropped_cols = _apply_feature_profile(feature_cols, cfg)
+    profile_kept_count = len(feature_cols)
     feature_cols, dropped_cols = _apply_feature_ablation(feature_cols, cfg)
+    profile = normalize_feature_profile(cfg.feature_profile)
+    if profile_dropped_cols:
+        preview = ", ".join(profile_dropped_cols[:12])
+        if len(profile_dropped_cols) > 12:
+            preview += ", ..."
+        log(
+            f"Feature profile '{profile}': kept {profile_kept_count} / {original_feature_count} features | "
+            f"dropped {len(profile_dropped_cols)} [{preview}]"
+        )
     if dropped_cols:
         preview = ", ".join(dropped_cols[:12])
         if len(dropped_cols) > 12:
@@ -156,6 +180,9 @@ def main() -> None:
                     "drop_contains": cfg.drop_contains or [],
                     "drop_cols": cfg.drop_cols or [],
                     "keep_prefixes": cfg.keep_prefixes or [],
+                    "feature_profile": profile,
+                    "scenario_mode": FUTURE_MODE if profile == FUTURE_FEATURE_PROFILE else "observed",
+                    "profile_dropped_feature_cols": profile_dropped_cols,
                     "dropped_feature_cols": dropped_cols,
                 }
                 save_checkpoint(
@@ -175,7 +202,7 @@ def main() -> None:
             f"(epoch {best['epoch']}, spearman {best['val_spearman']:.4f})"
         )
     else:
-        log("⚠️  Не удалось улучшить метрику — артефакты не сохранены")
+        log("Could not improve the validation metric; artifacts were not saved.")
 
 
 if __name__ == "__main__":

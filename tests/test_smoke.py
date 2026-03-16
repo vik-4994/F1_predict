@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -122,8 +123,14 @@ class SmokeTests(unittest.TestCase):
     def test_collect_saved_race_frames_recombines_existing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
-            pd.DataFrame({"Driver": ["VER"], "x": [1.0]}).to_parquet(out_dir / "features_2025_1.parquet", index=False)
-            pd.DataFrame({"Driver": ["NOR"], "x": [2.0]}).to_parquet(out_dir / "features_2025_2.parquet", index=False)
+            self.build_features.safe_to_parquet_or_csv(
+                pd.DataFrame({"Driver": ["VER"], "x": [1.0]}),
+                out_dir / "features_2025_1.parquet",
+            )
+            self.build_features.safe_to_parquet_or_csv(
+                pd.DataFrame({"Driver": ["NOR"], "x": [2.0]}),
+                out_dir / "features_2025_2.parquet",
+            )
 
             frames = self.build_features.collect_saved_race_frames(out_dir, "features", skip_tags={"2025_2"})
             self.assertEqual(len(frames), 1)
@@ -187,6 +194,46 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(cfg.drop_prefixes, ["pitcrew_", "slowstop_"])
         self.assertEqual(cfg.drop_contains, ["double_stack", "undercut", "overcut"])
         self.assertEqual(cfg.drop_cols, ["expected_stop_count", "first_stint_len_exp"])
+        self.assertEqual(cfg.feature_profile, "full")
+
+    def test_future_feature_profile_filters_observed_only_columns(self) -> None:
+        from src.scenario_support import select_feature_profile_cols
+
+        cols = [
+            "track_is_australian_grand_prix",
+            "weather_pre_air_temp_mean",
+            "driver_trend",
+            "expected_deg_S",
+            "wknd_pre_q_tm_delta_s",
+            "prac_pre_longrun_pace_s",
+            "qexec_pre_best_lap_s",
+            "tele_eff_pre_speed_p95_kph",
+        ]
+        out = select_feature_profile_cols(cols, "future")
+        self.assertEqual(
+            out,
+            [
+                "track_is_australian_grand_prix",
+                "weather_pre_air_temp_mean",
+                "driver_trend",
+                "expected_deg_S",
+            ],
+        )
+
+    def test_resolve_artifacts_dir_prefers_future_compatible_model(self) -> None:
+        from src.scenario_support import resolve_artifacts_dir
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            models_dir = Path(tmpdir)
+            base_dir = models_dir / "baseline_v4"
+            future_dir = models_dir / "baseline_future_v1"
+            base_dir.mkdir()
+            future_dir.mkdir()
+            (base_dir / "meta.json").write_text(json.dumps({"feature_profile": "full"}), encoding="utf-8")
+            (future_dir / "meta.json").write_text(json.dumps({"feature_profile": "future"}), encoding="utf-8")
+
+            resolved = resolve_artifacts_dir(base_dir, "future")
+            self.assertEqual(resolved, future_dir)
 
     def test_predict_parse_args_allows_full_grid_in_raw_mode(self) -> None:
         args = self.predict_script.parse_args(
@@ -203,6 +250,7 @@ class SmokeTests(unittest.TestCase):
         )
         self.assertIsNone(args.drivers)
         self.assertIsNone(args.track)
+        self.assertIsNone(args.future_artifacts)
 
     def test_scenario_builder_resolves_track_and_roster(self) -> None:
         from src.scenario_builder import load_roster_drivers, resolve_official_track_name

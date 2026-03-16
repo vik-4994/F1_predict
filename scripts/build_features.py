@@ -138,9 +138,13 @@ def discover_races(raw_dir: Path, races_filter: Optional[List[str]] = None) -> L
 
 def safe_to_parquet_or_csv(df: pd.DataFrame, path: Path, *, also_csv: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-             
-    df.to_parquet(path, index=False)
-    if also_csv:
+    wrote_csv = False
+    try:
+        df.to_parquet(path, index=False)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        df.to_csv(path.with_suffix(".csv"), index=False)
+        wrote_csv = True
+    if also_csv and not wrote_csv:
         df.to_csv(path.with_suffix(".csv"), index=False)
 
 
@@ -151,18 +155,31 @@ def collect_saved_race_frames(
     skip_tags: Optional[set[str]] = None,
 ) -> List[pd.DataFrame]:
     frames: List[pd.DataFrame] = []
-    for path in sorted(out_dir.glob(f"{prefix}_*.parquet")):
+    paths_by_tag: Dict[str, Path] = {}
+    candidates = sorted(
+        list(out_dir.glob(f"{prefix}_*.parquet")) + list(out_dir.glob(f"{prefix}_*.csv")),
+        key=lambda p: (p.stem, 0 if p.suffix == ".parquet" else 1),
+    )
+    for path in candidates:
         try:
             year, rnd = parse_year_round(path.name)
         except Exception:
             continue
         tag = f"{year}_{rnd}"
+        if tag not in paths_by_tag:
+            paths_by_tag[tag] = path
+
+    for tag, path in sorted(paths_by_tag.items(), key=lambda item: tuple(int(x) for x in item[0].split("_"))):
         if skip_tags and tag in skip_tags:
             continue
-        df = pd.read_parquet(path)
+        if path.suffix == ".parquet":
+            df = pd.read_parquet(path)
+        else:
+            df = pd.read_csv(path)
         df = df.copy()
-        df["year"] = int(year)
-        df["round"] = int(rnd)
+        year, rnd = (int(x) for x in tag.split("_"))
+        df["year"] = year
+        df["round"] = rnd
         frames.append(df)
     return frames
 

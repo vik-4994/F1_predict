@@ -45,7 +45,8 @@ def _to_seconds(series: pd.Series) -> pd.Series:
     except Exception:
         pass
     num = pd.to_numeric(series, errors="coerce")
-    med = num.replace([np.inf, -np.inf], np.nan).median()
+    finite = num.replace([np.inf, -np.inf], np.nan)
+    med = finite.median() if finite.notna().any() else np.nan
     if pd.notna(med) and med > 1e3:
         return num / 1000.0
     return num
@@ -255,4 +256,3 @@ def featurize(ctx: Dict) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = np.nan
     return out[keep]
-

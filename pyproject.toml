@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f1-rank"
+version = "0.2.1"
+description = "Pre-race Formula 1 ranking pipeline with feature building, training, and inference utilities."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyarrow>=15.0",
+  "torch>=2.2",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+export = [
+  "fastf1>=3.3",
+]
+ui = [
+  "streamlit>=1.32",
+]
+dev = [
+  "fastf1>=3.3",
+  "pytest>=8.0",
+  "scipy>=1.11",
+  "streamlit>=1.32",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
