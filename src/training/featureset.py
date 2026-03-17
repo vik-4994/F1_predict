@@ -113,11 +113,11 @@ _KEY = ["Driver", "year", "round"]
 
                                                                          
 _BLACKLIST = {
-                        
+                       
     "year", "round",
                               
     "finish_position", "finish_pos", "finish_order", "position", "place",
-    "finish_pos_eff",                                                
+    "finish_pos_eff", "outcome_id", "result_outcome",
                                        
     "Points", "GridPosition", "Status", "Time",
 }

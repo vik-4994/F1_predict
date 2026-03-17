@@ -7,7 +7,8 @@ The repository includes:
 - pre-race feature and target building;
 - PyTorch listwise/ranking model training;
 - CLI prediction for a specific weekend and season simulation;
-- a Streamlit UI for interactive inference.
+- a FastAPI backend and React dashboard for local operations and season projections;
+- a legacy Streamlit UI for interactive inference.
 
 ## Setup
 
@@ -16,6 +17,17 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Run the full React + API stack with Docker:
+
+```bash
+docker compose up --build
+```
+
+Then open:
+
+- `http://localhost:3000` for the dashboard
+- `http://localhost:8000/api/health` for the API health check
 
 Quick check:
 
@@ -74,6 +86,26 @@ Launch the UI:
 streamlit run ui/streamlit_app.py
 ```
 
+Run the API backend:
+
+```bash
+uvicorn api.app:app --reload
+```
+
+Run the React dashboard:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Run the Dockerized dashboard and API:
+
+```bash
+docker compose up --build
+```
+
 ## Current baseline
 
 The current baseline defaults are defined in `src/training/config.py`:
@@ -93,8 +125,10 @@ The current baseline defaults are defined in `src/training/config.py`:
 - `src/features/` - pre-race feature generators
 - `src/training/` - dataset, scaler, inference, and training engine
 - `scripts/` - CLI entry points
+- `api/` - FastAPI backend for the dashboard
+- `web/` - React/Vite frontend dashboard
 - `tests/` - smoke and regression tests
-- `ui/streamlit_app.py` - Streamlit UI
+- `ui/streamlit_app.py` - legacy Streamlit UI
 - `data/raw_csv/` - exported raw CSV files from FastF1
 - `data/processed/` - processed parquet/csv feature and target tables
 - `models/` - saved training artifacts
@@ -103,7 +137,10 @@ The current baseline defaults are defined in `src/training/config.py`:
 
 ## Notes
 
-- The main target is `finish_pos = results.positionOrder` with separate handling for DNF/DNS/DNQ.
+- The training target is multi-task: ranking among classified finishers plus a separate `finish / DNF / DSQ` outcome head.
 - Export and refresh workflows require `fastf1` to be installed.
 - The prediction pipeline supports both `observed` and `future` modes via `src/scenario_builder.py`.
 - For `future` mode, a separate artifact trained with `--feature-profile future` is recommended.
+- The React dashboard expects the API on `http://127.0.0.1:8000` and proxies `/api` requests during local dev.
+- The Docker stack publishes the dashboard on `http://localhost:3000` and the API on `http://localhost:8000`.
+- `docker-compose.yml` bind-mounts `data/`, `models/`, `out/`, and `reports/` so background jobs update host files directly.

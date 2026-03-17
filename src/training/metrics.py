@@ -138,6 +138,57 @@ def metrics_for_race(pred_scores: ArrayLike, true_order: ArrayLike) -> Dict[str,
     }
 
 
+def multiclass_accuracy(y_true: ArrayLike, y_pred: ArrayLike) -> float:
+    truth = _to_numpy(y_true).astype(int)
+    pred = _to_numpy(y_pred).astype(int)
+    if truth.size == 0:
+        return float("nan")
+    return float(np.mean(truth == pred))
+
+
+def class_recall(y_true: ArrayLike, y_pred: ArrayLike, class_id: int) -> float:
+    truth = _to_numpy(y_true).astype(int)
+    pred = _to_numpy(y_pred).astype(int)
+    mask = truth == int(class_id)
+    if not bool(mask.any()):
+        return float("nan")
+    return float(np.mean(pred[mask] == int(class_id)))
+
+
+def macro_f1(y_true: ArrayLike, y_pred: ArrayLike, num_classes: int) -> float:
+    truth = _to_numpy(y_true).astype(int)
+    pred = _to_numpy(y_pred).astype(int)
+    scores: List[float] = []
+    for class_id in range(int(num_classes)):
+        tp = float(np.sum((truth == class_id) & (pred == class_id)))
+        fp = float(np.sum((truth != class_id) & (pred == class_id)))
+        fn = float(np.sum((truth == class_id) & (pred != class_id)))
+        denom = 2.0 * tp + fp + fn
+        if denom <= 0:
+            continue
+        scores.append((2.0 * tp) / denom)
+    if not scores:
+        return float("nan")
+    return float(np.mean(scores))
+
+
+def outcome_metrics(
+    y_true: ArrayLike,
+    y_pred: ArrayLike,
+    labels: Optional[Sequence[str]] = None,
+) -> Dict[str, float]:
+    truth = _to_numpy(y_true).astype(int)
+    pred = _to_numpy(y_pred).astype(int)
+    class_labels = [str(label) for label in (labels or ("finish", "dnf", "dsq"))]
+    out: Dict[str, float] = {
+        "status_acc": multiclass_accuracy(truth, pred),
+        "status_macro_f1": macro_f1(truth, pred, num_classes=len(class_labels)),
+    }
+    for idx, label in enumerate(class_labels):
+        out[f"{label}_recall"] = class_recall(truth, pred, idx)
+    return out
+
+
                                               
 
 def aggregate_metrics(per_race: List[Dict[str, float]]) -> Dict[str, float]:
@@ -162,5 +213,9 @@ __all__ = [
     "top1_accuracy",
     "ndcg_at_k",
     "metrics_for_race",
+    "multiclass_accuracy",
+    "class_recall",
+    "macro_f1",
+    "outcome_metrics",
     "aggregate_metrics",
 ]

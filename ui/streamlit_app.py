@@ -4,6 +4,7 @@ import difflib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -24,11 +25,20 @@ from src.scenario_builder import (
 )
 from src.scenario_support import is_artifact_compatible, resolve_artifacts_dir
 from src.training import InferenceRunner
+from src.ui_jobs import (
+    DEFAULT_FUTURE_RUN_NAME,
+    ROOT as PROJECT_ROOT,
+    active_job,
+    future_artifacts_dir,
+    read_status,
+    season_output_dir,
+)
 
 
 RAW_DIR = ROOT / "data" / "raw_csv"
 MODELS_DIR = ROOT / "models"
 DEFAULT_MODEL = "baseline_v4"
+DEFAULT_SEASON_SCENARIO = "future"
 BUY_ME_A_COFFEE_URL = os.getenv("BUY_ME_A_COFFEE_URL", "").strip()
 ALPHA_NUM = "abcdefghijklmnopqrstuvwxyz0123456789"
 GRID_ALIASES = [
@@ -322,8 +332,28 @@ def _apply_grid_weight(
 
     df = rank_df.copy()
     df["__grid_pos__"] = df["Driver"].map(grid_map).fillna(10.0)
-    df["score"] = df["score"] - float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
-    probs = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
+    penalty = float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
+    base_rank_col = "score_rank" if "score_rank" in df.columns else "score"
+    df[base_rank_col] = df[base_rank_col] - penalty
+
+    if "score_status" in df.columns and "score_rank" in df.columns:
+        rank_vals = df["score_rank"].to_numpy(dtype=np.float64)
+        centered = rank_vals - rank_vals.mean()
+        sigma = rank_vals.std()
+        if sigma > 1e-6:
+            centered = np.clip(centered / sigma, -3.0, 3.0)
+        df["score"] = df["score_status"].to_numpy(dtype=np.float64) * 10.0 + centered
+        if "p_finish" in df.columns:
+            probs = _softmax_stable(
+                df["score_rank"].to_numpy(dtype=np.float64)
+                + np.log(np.clip(df["p_finish"].to_numpy(dtype=np.float64), 1e-6, 1.0)),
+                tau=float(tau),
+            )
+        else:
+            probs = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
+    else:
+        df["score"] = df[base_rank_col].to_numpy(dtype=np.float64)
+        probs = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
     df["p_win"] = probs.astype(np.float32)
     df = df.sort_values("score", ascending=False).reset_index(drop=True)
     df["rank"] = np.arange(1, len(df) + 1, dtype=np.int32)
@@ -407,6 +437,138 @@ def _discover_models(models_dir: Path) -> List[str]:
         if needed.issubset(files):
             out.append(child.name)
     return out
+
+
+def _launch_background_job(job: str, year: int, model_name: str, future_run_name: str = DEFAULT_FUTURE_RUN_NAME) -> None:
+    subprocess.Popen(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "ui_job_runner.py"),
+            "--job",
+            str(job),
+            "--year",
+            str(int(year)),
+            "--baseline-artifacts",
+            str(MODELS_DIR / model_name),
+            "--future-run-name",
+            str(future_run_name),
+        ],
+        cwd=str(PROJECT_ROOT),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _load_season_outputs(year: int, scenario_mode: str = DEFAULT_SEASON_SCENARIO) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    out_dir = season_output_dir(int(year), scenario_mode)
+    driver_path = out_dir / f"driver_standings_{int(year)}.csv"
+    team_path = out_dir / f"team_standings_{int(year)}.csv"
+    season_path = out_dir / f"season_predictions_{int(year)}.csv"
+
+    driver_df = pd.read_csv(driver_path) if driver_path.exists() else pd.DataFrame()
+    team_df = pd.read_csv(team_path) if team_path.exists() else pd.DataFrame()
+    season_df = pd.read_csv(season_path) if season_path.exists() else pd.DataFrame()
+    return driver_df, team_df, season_df
+
+
+def _render_ops_panel(model_name: str, year: int) -> None:
+    status = read_status()
+    active = active_job()
+    is_running = bool(active)
+    effective_status = active if active else status
+
+    st.markdown("## Season Ops")
+    st.markdown(
+        """
+        <div class="panel">
+            Launch long-running local jobs from the UI: refresh FastF1 data, train the future model, and simulate the full season.
+            The jobs run in the background and write logs plus status to the workspace.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(4)
+    if cols[0].button("Refresh Data", use_container_width=True, disabled=is_running):
+        _launch_background_job("refresh", int(year), model_name)
+        st.rerun()
+    if cols[1].button("Train Future Model", use_container_width=True, disabled=is_running):
+        _launch_background_job("train_future", int(year), model_name)
+        st.rerun()
+    if cols[2].button("Simulate Season", use_container_width=True, disabled=is_running):
+        _launch_background_job("simulate_future", int(year), model_name)
+        st.rerun()
+    if cols[3].button("Run Full Pipeline", type="primary", use_container_width=True, disabled=is_running):
+        _launch_background_job("full_future", int(year), model_name)
+        st.rerun()
+
+    refresh_col, info_col = st.columns([0.25, 0.75])
+    if refresh_col.button("Refresh Status", use_container_width=True):
+        st.rerun()
+
+    if effective_status:
+        state = str(effective_status.get("state", "idle")).upper()
+        step = str(effective_status.get("current_step") or "-")
+        info_col.caption(
+            f"State: {state} | Step: {step} | Started: {effective_status.get('started_at', '-')}"
+        )
+        log_path = effective_status.get("log_path")
+        message = str(effective_status.get("message", ""))
+        if message:
+            if state == "FAILED":
+                st.error(message)
+            elif state == "SUCCEEDED":
+                st.success(message)
+            else:
+                st.info(message)
+        if log_path and Path(str(log_path)).exists():
+            with st.expander("Job log", expanded=False):
+                log_text = Path(str(log_path)).read_text(encoding="utf-8", errors="replace")
+                st.code(log_text[-12000:] if len(log_text) > 12000 else log_text, language="text")
+    else:
+        info_col.caption("No background jobs have been started yet.")
+
+
+def _render_season_dashboard(year: int, scenario_mode: str = DEFAULT_SEASON_SCENARIO) -> None:
+    driver_df, team_df, season_df = _load_season_outputs(int(year), scenario_mode)
+    out_dir = season_output_dir(int(year), scenario_mode)
+
+    st.markdown("## Season Projection")
+    if driver_df.empty:
+        st.warning(
+            f"No season projection found for {year}. Run 'Simulate Season' or 'Run Full Pipeline' to generate "
+            f"{out_dir.name}."
+        )
+        return
+
+    metrics = st.columns(4)
+    leader = driver_df.iloc[0]
+    metrics[0].metric("Projected champion", str(leader.get("Driver", "-")))
+    metrics[1].metric("Projected points", int(leader.get("points", 0)))
+    metrics[2].metric("Drivers ranked", len(driver_df))
+    metrics[3].metric("Scenario", scenario_mode.upper())
+
+    left, right = st.columns([1.2, 0.8], gap="large")
+    with left:
+        st.markdown("### Driver Standings")
+        st.dataframe(driver_df, use_container_width=True, hide_index=True)
+    with right:
+        if not team_df.empty:
+            st.markdown("### Team Standings")
+            st.dataframe(team_df, use_container_width=True, hide_index=True)
+        else:
+            st.markdown("### Team Standings")
+            st.caption("Team standings are not available for this projection.")
+
+    if not season_df.empty:
+        race_points = (
+            season_df.groupby(["round", "Driver"], as_index=False)["points"].sum()
+            .sort_values(["round", "points", "Driver"], ascending=[True, False, True])
+        )
+        st.markdown("### Race-by-Race Points")
+        st.dataframe(race_points, use_container_width=True, hide_index=True)
 
 
 @st.cache_resource(show_spinner=False)
@@ -598,9 +760,14 @@ def _prediction_summary(rank_df: pd.DataFrame, meta: Dict[str, object], topk: in
     )
 
     display_df = rank_df.copy()
-    if "p_win" in display_df.columns:
-        display_df["p_win_%"] = (display_df["p_win"].astype(float) * 100.0).round(2)
-    view_cols = [col for col in ["rank", "Driver", "score", "p_win_%"] if col in display_df.columns]
+    for prob_col in ("p_win", "p_finish", "p_dnf", "p_dsq"):
+        if prob_col in display_df.columns:
+            display_df[f"{prob_col}_%"] = (display_df[prob_col].astype(float) * 100.0).round(2)
+    view_cols = [
+        col
+        for col in ["rank", "Driver", "predicted_outcome", "score", "p_win_%", "p_finish_%", "p_dnf_%", "p_dsq_%"]
+        if col in display_df.columns
+    ]
     st.dataframe(display_df[view_cols].head(int(topk)), use_container_width=True, hide_index=True)
 
 
@@ -654,43 +821,48 @@ def main() -> None:
 
     _render_hero()
     state = _render_sidebar(models, years)
+    selected_year = int(state["selected_year"])
+    selected_model = str(state["selected_model"])
 
-    if not state["submit"]:
-        st.info("Pick a race configuration in the sidebar, then run a prediction.")
-        return
+    ops_col, prediction_col = st.columns([0.95, 1.35], gap="large")
+    with ops_col:
+        _render_ops_panel(selected_model, selected_year)
+        _render_season_dashboard(selected_year, DEFAULT_SEASON_SCENARIO)
 
-    try:
-        with st.spinner("Building scenario features and scoring drivers..."):
-            features_df, rank_df, resolved_track, roster, meta = _run_prediction(
-                model_name=str(state["selected_model"]),
-                year=int(state["selected_year"]),
-                rnd=int(state["selected_round"]),
-                scenario_mode=str(state["scenario_mode"]),
-                track_name=str(state["track_name"]),
-                drivers_csv=str(state["drivers_csv"]),
-                tau=float(state["tau"]),
-                grid_weight=float(state["grid_weight"]),
-                grid_csv=str(state["grid_csv"]),
-                weather_payload=dict(state["weather"]),
-            )
-    except Exception as exc:
-        st.exception(exc)
-        return
+    with prediction_col:
+        if not state["submit"]:
+            st.info("Pick a race configuration in the sidebar, then run a prediction.")
+            return
 
-    main_col, side_col = st.columns([1.65, 1.0], gap="large")
-    with main_col:
+        try:
+            with st.spinner("Building scenario features and scoring drivers..."):
+                features_df, rank_df, resolved_track, roster, meta = _run_prediction(
+                    model_name=selected_model,
+                    year=selected_year,
+                    rnd=int(state["selected_round"]),
+                    scenario_mode=str(state["scenario_mode"]),
+                    track_name=str(state["track_name"]),
+                    drivers_csv=str(state["drivers_csv"]),
+                    tau=float(state["tau"]),
+                    grid_weight=float(state["grid_weight"]),
+                    grid_csv=str(state["grid_csv"]),
+                    weather_payload=dict(state["weather"]),
+                )
+        except Exception as exc:
+            st.exception(exc)
+            return
+
         st.markdown("## Prediction")
         _prediction_summary(rank_df, meta, topk=int(state["topk"]))
         st.markdown("## Win Probability")
         _render_charts(rank_df, topk=int(state["topk"]))
-    with side_col:
         st.markdown("## Model Card")
         st.json(
             {
-                "model": str(state["selected_model"]),
+                "model": selected_model,
                 "effective_model": meta.get("effective_model_name"),
                 "track": resolved_track,
-                "year": int(state["selected_year"]),
+                "year": selected_year,
                 "round": int(state["selected_round"]),
                 "mode": meta.get("resolved_mode"),
                 "features": int(meta.get("num_features", 0)),
@@ -699,9 +871,8 @@ def main() -> None:
             },
             expanded=True,
         )
-
-    st.markdown("## Export")
-    _render_footer(features_df, rank_df, resolved_track, roster)
+        st.markdown("## Export")
+        _render_footer(features_df, rank_df, resolved_track, roster)
 
 
 if __name__ == "__main__":

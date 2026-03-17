@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 import pandas as pd
 import numpy as np
 
 from .featureset import sanitize_frame_columns
+from .outcomes import DSQ_ID, FINISH_ID, outcome_id_series, outcome_label_series
 
 
 KEY = ["Driver", "year", "round"]
@@ -41,18 +42,22 @@ def load_all(features_path: Path, targets_path: Path) -> tuple[pd.DataFrame, pd.
 
                                       
 
-def _finish_pos_eff(tgt: pd.DataFrame, dnf_position: int = 21) -> pd.Series:
+def _finish_pos_eff(
+    tgt: pd.DataFrame,
+    dnf_position: int = 21,
+    dsq_position: int = 25,
+) -> pd.Series:
     """
     Compute effective finishing position:
       - If 'Status' exists: any status not containing 'Finished' or 'Plus' -> DNF -> dnf_position.
       - Else: just numeric 'finish_position'.
     """
     pos = pd.to_numeric(tgt.get("finish_position"), errors="coerce")
-    status = tgt.get("Status")
+    status = tgt.get("Status", pd.Series(index=tgt.index, dtype="object"))
+    outcome_ids = outcome_id_series(status, pos)
+    eff = np.where(outcome_ids.eq(DSQ_ID), float(dsq_position), float(dnf_position))
+    eff = np.where(outcome_ids.eq(FINISH_ID), pos, eff)
     if status is not None:
-        status = status.astype(str)
-        finished = status.str.contains("Finished", case=False, na=False) | status.str.contains("Plus", case=False, na=False)
-        eff = np.where(finished, pos, float(dnf_position))
         return pd.Series(eff, index=tgt.index)
     return pos
 
@@ -61,10 +66,13 @@ def build_train_table(
     F: pd.DataFrame,
     T: pd.DataFrame,
     dnf_position: int = 21,
+    dsq_position: int = 25,
 ) -> pd.DataFrame:
     """
     Inner-join features with targets on (Driver, year, round) and add:
       - finish_pos_eff
+      - result_outcome
+      - outcome_id
     Rows without targets are dropped (модель учится только на имеющихся финишах).
     """
     need_cols = set(KEY + ["finish_position", "Status"])
@@ -72,7 +80,9 @@ def build_train_table(
     df = F.merge(Tsel, on=KEY, how="inner")
     if df.empty:
         return df
-    df["finish_pos_eff"] = _finish_pos_eff(df, dnf_position=dnf_position)
+    df["result_outcome"] = outcome_label_series(df.get("Status"), df.get("finish_position"))
+    df["outcome_id"] = outcome_id_series(df.get("Status"), df.get("finish_position"))
+    df["finish_pos_eff"] = _finish_pos_eff(df, dnf_position=dnf_position, dsq_position=dsq_position)
     return df
 
 
@@ -110,6 +120,24 @@ def time_split(df: pd.DataFrame, val_last: int = 6) -> tuple[pd.DataFrame, pd.Da
 
                                            
 
+def race_recency_weights(df: pd.DataFrame, half_life: float | None = None) -> Dict[Tuple[int, int], float]:
+    """Return chronological race weights normalized to mean=1."""
+    rc = races_list(df)
+    if not rc:
+        return {}
+    hl = float(half_life) if half_life is not None else float("nan")
+    if not np.isfinite(hl) or hl <= 0:
+        return {race: 1.0 for race in rc}
+    ages = np.arange(len(rc) - 1, -1, -1, dtype=float)
+    decay = np.log(2.0) / hl
+    weights = np.exp(-decay * ages)
+    mean_weight = float(weights.mean()) if weights.size else 1.0
+    if not np.isfinite(mean_weight) or mean_weight <= 0:
+        mean_weight = 1.0
+    weights = weights / mean_weight
+    return {race: float(weight) for race, weight in zip(rc, weights)}
+
+
 def group_by_race(df: pd.DataFrame) -> list[pd.DataFrame]:
     """Return list of per-race DataFrames (sorted by (year, round))."""
     out = []
@@ -122,6 +150,7 @@ __all__ = [
     "load_all",
     "build_train_table",
     "time_split",
+    "race_recency_weights",
     "races_list",
     "group_by_race",
 ]

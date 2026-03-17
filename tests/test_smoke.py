@@ -56,8 +56,26 @@ def _load_predict_module():
     return module
 
 
+def _load_train_module():
+    spec = importlib.util.spec_from_file_location("train_script", ROOT / "scripts" / "train.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_simulate_season_module():
     spec = importlib.util.spec_from_file_location("simulate_season_script", ROOT / "scripts" / "simulate_season.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_ui_job_runner_module():
+    spec = importlib.util.spec_from_file_location("ui_job_runner_script", ROOT / "scripts" / "ui_job_runner.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     sys.modules[spec.name] = module
@@ -73,6 +91,7 @@ class SmokeTests(unittest.TestCase):
         cls.export_fastf1 = _load_export_module()
         cls.predict_script = _load_predict_module()
         cls.simulate_season = _load_simulate_season_module()
+        cls.ui_job_runner = _load_ui_job_runner_module()
 
     def test_sanitize_frame_columns_strips_and_coalesces(self) -> None:
         df = pd.DataFrame(
@@ -195,6 +214,117 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(cfg.drop_contains, ["double_stack", "undercut", "overcut"])
         self.assertEqual(cfg.drop_cols, ["expected_stop_count", "first_stint_len_exp"])
         self.assertEqual(cfg.feature_profile, "full")
+        self.assertEqual(cfg.dsq_position, 25)
+        self.assertAlmostEqual(cfg.status_loss_weight, 1.0)
+
+    def test_train_selection_score_uses_status_macro_f1_alongside_spearman(self) -> None:
+        module = _load_train_module()
+
+        a = {"spearman": 0.82, "status_macro_f1": 0.20}
+        b = {"spearman": 0.78, "status_macro_f1": 0.40}
+
+        self.assertGreater(module._selection_score(b), module._selection_score(a))
+
+    def test_regulation_era_mapping_splits_years_into_expected_buckets(self) -> None:
+        from src.training.regulations import regulation_era_for_year
+
+        self.assertEqual(regulation_era_for_year(2001), "v10_groove")
+        self.assertEqual(regulation_era_for_year(2007), "v8_refuel")
+        self.assertEqual(regulation_era_for_year(2011), "aero_kers")
+        self.assertEqual(regulation_era_for_year(2015), "hybrid_v6_initial")
+        self.assertEqual(regulation_era_for_year(2019), "wide_aero_hybrid")
+        self.assertEqual(regulation_era_for_year(2024), "ground_effect")
+        self.assertEqual(regulation_era_for_year(2026), "next_gen_2026")
+
+    def test_regulation_era_weights_prioritize_newer_regulations(self) -> None:
+        from src.training.regulations import combine_race_weight_maps, regulation_era_race_weights
+
+        df = pd.DataFrame(
+            {
+                "year": [2001, 2001, 2019, 2019, 2024, 2024, 2026, 2026],
+                "round": [1, 1, 1, 1, 1, 1, 1, 1],
+            }
+        )
+        weights = regulation_era_race_weights(df, normalize=False)
+        combined = combine_race_weight_maps(weights, normalize=False)
+
+        self.assertLess(weights[(2001, 1)], weights[(2019, 1)])
+        self.assertLess(weights[(2019, 1)], weights[(2024, 1)])
+        self.assertLess(weights[(2024, 1)], weights[(2026, 1)])
+        self.assertEqual(combined, weights)
+
+    def test_outcome_status_normalization_maps_finish_dnf_and_dsq(self) -> None:
+        from src.training.outcomes import normalize_outcome_status
+
+        self.assertEqual(normalize_outcome_status("Finished", 1), "finish")
+        self.assertEqual(normalize_outcome_status("+1 Lap", 12), "finish")
+        self.assertEqual(normalize_outcome_status("Engine", np.nan), "dnf")
+        self.assertEqual(normalize_outcome_status("Disqualified", 2), "dsq")
+
+    def test_build_train_table_adds_result_outcome_columns(self) -> None:
+        from src.training.data_io import build_train_table
+
+        features = pd.DataFrame(
+            {
+                "Driver": ["VER", "NOR", "HAM"],
+                "year": [2025, 2025, 2025],
+                "round": [1, 1, 1],
+                "pace": [1.0, 2.0, 3.0],
+            }
+        )
+        targets = pd.DataFrame(
+            {
+                "Driver": ["VER", "NOR", "HAM"],
+                "year": [2025, 2025, 2025],
+                "round": [1, 1, 1],
+                "finish_position": [1, np.nan, 20],
+                "Status": ["Finished", "Engine", "Disqualified"],
+            }
+        )
+
+        out = build_train_table(features, targets, dnf_position=21, dsq_position=25)
+        self.assertEqual(out["result_outcome"].tolist(), ["finish", "dnf", "dsq"])
+        self.assertEqual(out["outcome_id"].tolist(), [0, 1, 2])
+        self.assertEqual(out["finish_pos_eff"].tolist(), [1.0, 21.0, 25.0])
+
+    def test_predict_custom_multitask_adds_outcome_probabilities(self) -> None:
+        import torch
+        import torch.nn as nn
+
+        from src.training.featureset import FeatureScaler
+        from src.training.inference import Artifacts, predict_custom
+
+        class DummyOutcomeModel(nn.Module):
+            def forward(self, x):
+                rank_scores = x[:, 0]
+                status_logits = torch.tensor(
+                    [[3.0, 0.0, -2.0], [0.0, 2.0, -1.0], [-2.0, -1.0, 3.0]],
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+                return rank_scores, status_logits
+
+        features_df = pd.DataFrame(
+            {
+                "Driver": ["VER", "NOR", "HAM"],
+                "year": [2025, 2025, 2025],
+                "round": [1, 1, 1],
+                "pace": [3.0, 2.0, 1.0],
+            }
+        )
+        artifacts = Artifacts(
+            model=DummyOutcomeModel(),
+            scaler=FeatureScaler(mean=np.array([0.0], dtype=np.float32), std=np.array([1.0], dtype=np.float32)),
+            feature_cols=["pace"],
+            meta={"num_status_classes": 3, "outcome_labels": ["finish", "dnf", "dsq"]},
+            device="cpu",
+        )
+
+        out = predict_custom(artifacts, features_df, include_probs=True)
+        self.assertEqual(out["Driver"].tolist(), ["VER", "NOR", "HAM"])
+        self.assertEqual(out["predicted_outcome"].tolist(), ["finish", "dnf", "dsq"])
+        self.assertTrue({"p_finish", "p_dnf", "p_dsq", "score_rank", "score_status", "p_win"}.issubset(out.columns))
+        self.assertGreater(float(out.loc[out["Driver"] == "VER", "p_finish"].iloc[0]), 0.9)
 
     def test_future_feature_profile_filters_observed_only_columns(self) -> None:
         from src.scenario_support import select_feature_profile_cols
@@ -234,6 +364,107 @@ class SmokeTests(unittest.TestCase):
 
             resolved = resolve_artifacts_dir(base_dir, "future")
             self.assertEqual(resolved, future_dir)
+
+    def test_ui_jobs_season_output_dir_uses_future_suffix(self) -> None:
+        from src.ui_jobs import season_output_dir
+
+        out_dir = season_output_dir(2026, "future")
+        self.assertEqual(out_dir.name, "season_2026_future")
+
+    def test_ui_jobs_season_output_dir_supports_auto_suffix(self) -> None:
+        from src.ui_jobs import season_output_dir
+
+        out_dir = season_output_dir(2026, "auto")
+        self.assertEqual(out_dir.name, "season_2026_auto")
+
+    def test_ui_job_runner_simulate_commands_use_selected_scenario(self) -> None:
+        args = self.ui_job_runner.parse_args(
+            [
+                "--job",
+                "simulate_season",
+                "--year",
+                "2026",
+                "--scenario-mode",
+                "auto",
+            ]
+        )
+        commands = self.ui_job_runner._commands(args)
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["name"], "simulate_auto_season")
+        self.assertIn("auto", commands[0]["cmd"])
+        self.assertEqual(Path(str(commands[0]["cmd"][-1])).name, "season_2026_auto")
+
+    def test_ui_jobs_read_status_marks_dead_running_job_failed(self) -> None:
+        import importlib
+
+        ui_jobs = importlib.import_module("src.ui_jobs")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs_dir = Path(tmpdir)
+            status_path = jobs_dir / "status.json"
+            lock_path = jobs_dir / "job.lock"
+
+            with mock.patch.object(ui_jobs, "JOBS_DIR", jobs_dir), \
+                mock.patch.object(ui_jobs, "STATUS_PATH", status_path), \
+                mock.patch.object(ui_jobs, "LOCK_PATH", lock_path):
+                status_path.write_text(json.dumps({"state": "running", "pid": 999999}), encoding="utf-8")
+                status = ui_jobs.read_status()
+
+            self.assertEqual(status["state"], "failed")
+            self.assertIn("no longer running", str(status["message"]).lower())
+
+    def test_dashboard_data_load_season_outputs_builds_race_points(self) -> None:
+        import importlib
+
+        dashboard_data = importlib.import_module("src.dashboard_data")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "season_2026_future"
+            out_dir.mkdir(parents=True)
+            pd.DataFrame(
+                [{"rank": 1, "Driver": "NOR", "points": 420, "wins": 8, "podiums": 15, "races": 24}]
+            ).to_csv(out_dir / "driver_standings_2026.csv", index=False)
+            pd.DataFrame(
+                [{"rank": 1, "Team": "McLaren", "points": 760, "wins": 12, "podiums": 25, "races": 24}]
+            ).to_csv(out_dir / "team_standings_2026.csv", index=False)
+            pd.DataFrame(
+                [
+                    {"round": 1, "Driver": "NOR", "points": 25},
+                    {"round": 1, "Driver": "PIA", "points": 18},
+                    {"round": 2, "Driver": "NOR", "points": 18},
+                ]
+            ).to_csv(out_dir / "season_predictions_2026.csv", index=False)
+
+            with mock.patch.object(dashboard_data, "season_output_dir", return_value=out_dir):
+                payload = dashboard_data.load_season_outputs(2026, "future")
+
+            self.assertEqual(payload["driver_standings"][0]["Driver"], "NOR")
+            self.assertEqual(payload["team_standings"][0]["Team"], "McLaren")
+            self.assertEqual(payload["race_points"][0]["round"], 1)
+            self.assertEqual(payload["race_points"][0]["points"], 25)
+
+    def test_dashboard_data_bootstrap_payload_collects_models_years_and_status(self) -> None:
+        import importlib
+
+        dashboard_data = importlib.import_module("src.dashboard_data")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir) / "raw_csv"
+            models_dir = Path(tmpdir) / "models"
+            raw_dir.mkdir(parents=True)
+            models_dir.mkdir(parents=True)
+            pd.DataFrame({"round": [1, 2]}).to_csv(raw_dir / "schedule_2026.csv", index=False)
+            model_dir = models_dir / "baseline_v4"
+            model_dir.mkdir()
+            for name in ("ranker.pt", "scaler.json", "feature_cols.txt"):
+                (model_dir / name).write_text("", encoding="utf-8")
+
+            with mock.patch.object(dashboard_data, "RAW_DIR", raw_dir), \
+                mock.patch.object(dashboard_data, "MODELS_DIR", models_dir), \
+                mock.patch.object(dashboard_data, "read_status", return_value={"state": "idle"}):
+                payload = dashboard_data.bootstrap_payload()
+
+            self.assertEqual(payload["default_model"], "baseline_v4")
+            self.assertEqual(payload["years"], [2026])
+            self.assertEqual(payload["rounds_by_year"]["2026"], [1, 2])
 
     def test_predict_parse_args_allows_full_grid_in_raw_mode(self) -> None:
         args = self.predict_script.parse_args(
@@ -1471,6 +1702,145 @@ class SmokeTests(unittest.TestCase):
             for col in ("expected_deg_S", "expected_deg_M", "expected_deg_H"):
                 self.assertTrue(pd.notna(out[col]).all())
                 self.assertTrue((pd.to_numeric(out[col], errors="coerce") > 0).all())
+
+    def test_quali_priors_recency_weighting_prefers_recent_rounds(self) -> None:
+        from src.features.quali_priors_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR"]}).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+            pd.DataFrame({"Abbreviation": ["NOR"], "Position": [1], "Points": [25], "Status": ["Finished"]}).to_csv(
+                raw_dir / "results_2025_1_Q.csv",
+                index=False,
+            )
+            pd.DataFrame({"Abbreviation": ["NOR"], "Position": [18], "Points": [0], "Status": ["Finished"]}).to_csv(
+                raw_dir / "results_2025_2_Q.csv",
+                index=False,
+            )
+
+            out = featurize(
+                {
+                    "raw_dir": raw_dir,
+                    "year": 2025,
+                    "round": 3,
+                    "quali_recency_half_life": 1.0,
+                }
+            )
+
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            self.assertGreater(float(nor["quali_pre_pos_p50"]), 10.0)
+            self.assertEqual(int(nor["quali_pre_last_seen_round"]), 2)
+
+    def test_driver_team_priors_recency_weighting_prefers_recent_rounds(self) -> None:
+        from src.features.driver_team_priors_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR"], "TeamName": ["McLaren"]}).to_csv(
+                raw_dir / "results_2025_3_Q.csv",
+                index=False,
+            )
+            pd.DataFrame(
+                {
+                    "Abbreviation": ["NOR"],
+                    "TeamName": ["McLaren"],
+                    "Position": [1],
+                    "GridPosition": [1],
+                    "Points": [25],
+                    "Status": ["Finished"],
+                }
+            ).to_csv(raw_dir / "results_2025_1.csv", index=False)
+            pd.DataFrame(
+                {
+                    "Abbreviation": ["NOR"],
+                    "TeamName": ["McLaren"],
+                    "Position": [17],
+                    "GridPosition": [16],
+                    "Points": [0],
+                    "Status": ["Finished"],
+                }
+            ).to_csv(raw_dir / "results_2025_2.csv", index=False)
+
+            out = featurize(
+                {
+                    "raw_dir": raw_dir,
+                    "year": 2025,
+                    "round": 3,
+                    "driver_team_recency_half_life": 1.0,
+                }
+            )
+
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            self.assertGreater(float(nor["driver_team_pre_driver_finish_p50"]), 9.0)
+            self.assertGreater(float(nor["driver_team_pre_team_finish_p50"]), 9.0)
+
+    def test_telemetry_history_recency_weighting_prefers_recent_rounds(self) -> None:
+        from src.features.telemetry_history_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR"]}).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+            pd.DataFrame({"Driver": ["NOR"], "BestLapTime": ["0 days 00:01:30.000"], "TopSpeedKph": [324.0]}).to_csv(
+                raw_dir / "telemetry_agg_2025_1.csv",
+                index=False,
+            )
+            pd.DataFrame({"Driver": ["NOR"], "BestLapTime": ["0 days 00:01:40.000"], "TopSpeedKph": [318.0]}).to_csv(
+                raw_dir / "telemetry_agg_2025_2.csv",
+                index=False,
+            )
+
+            out = featurize(
+                {
+                    "raw_dir": raw_dir,
+                    "year": 2025,
+                    "round": 3,
+                    "telemetry_recency_half_life": 1.0,
+                }
+            )
+
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            self.assertGreater(float(nor["tele_pre_bestlap_p50_s"]), 95.0)
+
+    def test_tyre_priors_recency_weighting_prefers_recent_mix(self) -> None:
+        from src.features.tyre_priors_pre import featurize
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            pd.DataFrame({"Abbreviation": ["NOR"]}).to_csv(raw_dir / "results_2025_3_Q.csv", index=False)
+            pd.DataFrame(
+                {
+                    "Driver": ["NOR"] * 6,
+                    "LapNumber": [1, 2, 3, 4, 5, 6],
+                    "LapTime": ["0 days 00:01:35.000"] * 6,
+                    "Stint": [1] * 6,
+                    "Compound": ["SOFT"] * 6,
+                }
+            ).to_csv(raw_dir / "laps_2025_1.csv", index=False)
+            pd.DataFrame(
+                {
+                    "Driver": ["NOR"] * 6,
+                    "LapNumber": [1, 2, 3, 4, 5, 6],
+                    "LapTime": ["0 days 00:01:36.000"] * 6,
+                    "Stint": [1] * 6,
+                    "Compound": ["HARD"] * 6,
+                }
+            ).to_csv(raw_dir / "laps_2025_2.csv", index=False)
+
+            out = featurize(
+                {
+                    "raw_dir": raw_dir,
+                    "year": 2025,
+                    "round": 3,
+                    "tyre_recency_half_life": 1.0,
+                }
+            )
+
+            self.assertFalse(out.empty)
+            nor = out.loc[out["Driver"] == "NOR"].iloc[0]
+            self.assertGreater(float(nor["compound_mix_priors_H"]), float(nor["compound_mix_priors_S"]))
 
     def test_driver_track_cluster_module_has_signal_on_repo_data(self) -> None:
         from src.features.driver_track_cluster_pre import featurize

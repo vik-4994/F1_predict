@@ -8,7 +8,7 @@ import argparse
 import json
 import time
 
-from src.scenario_support import FULL_FEATURE_PROFILE
+from src.scenario_support import FULL_FEATURE_PROFILE, FUTURE_FEATURE_PROFILE
 
 
 def _parse_hidden(s: str) -> List[int]:
@@ -38,6 +38,28 @@ def _parse_csv_list(s: str) -> List[str]:
     return [tok.strip() for tok in s.split(",") if tok.strip()]
 
 
+def _parse_float_mapping(s: str) -> dict[str, float]:
+    text = (s or "").strip()
+    if not text:
+        return {}
+    out: dict[str, float] = {}
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(f"Invalid mapping item: '{item}'")
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise argparse.ArgumentTypeError(f"Invalid mapping item: '{item}'")
+        try:
+            out[key] = float(raw_value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid float value in mapping item: '{item}'") from exc
+    return out
+
+
 BASELINE_HIDDEN = [128, 64]
 BASELINE_DROPOUT = 0.25
 BASELINE_LR = 7e-4
@@ -46,6 +68,7 @@ BASELINE_EPOCHS = 16
 BASELINE_DROP_PREFIXES = ["pitcrew_", "slowstop_"]
 BASELINE_DROP_CONTAINS = ["double_stack", "undercut", "overcut"]
 BASELINE_DROP_COLS = ["expected_stop_count", "first_stint_len_exp"]
+FUTURE_TRAIN_RECENCY_HALF_LIFE = 8.0
 
 
 @dataclass
@@ -73,11 +96,16 @@ class TrainConfig:
                     
     log_every: int = 1                                                         
     dnf_position: int = 21                                                                     
+    dsq_position: int = 25
+    status_loss_weight: float = 1.0
     drop_prefixes: List[str] = field(default_factory=lambda: list(BASELINE_DROP_PREFIXES))
     drop_contains: List[str] = field(default_factory=lambda: list(BASELINE_DROP_CONTAINS))
     drop_cols: List[str] = field(default_factory=lambda: list(BASELINE_DROP_COLS))
     keep_prefixes: List[str] = field(default_factory=list)
     feature_profile: str = FULL_FEATURE_PROFILE
+    train_recency_half_life: Optional[float] = None
+    use_regulation_era_weights: bool = True
+    era_weights: dict[str, float] = field(default_factory=dict)
 
     def artifacts_dir(self) -> Path:
         """Return models/<run_name> under out_dir."""
@@ -127,6 +155,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--log-every", type=int, default=1, help="Logging frequency in epochs")
     ap.add_argument("--dnf-position", type=int, default=21,
                     help="Effective finishing position used for DNF ordering during training")
+    ap.add_argument("--dsq-position", type=int, default=25,
+                    help="Effective finishing position used for DSQ ordering during training/eval")
+    ap.add_argument("--status-loss-weight", type=float, default=1.0,
+                    help="Weight for the finish/DNF/DSQ classification loss")
     ap.add_argument("--drop-prefixes", type=_parse_csv_list, default=list(BASELINE_DROP_PREFIXES),
                     help='Drop features by prefix, e.g. "tele_pre_,pitcrew_"')
     ap.add_argument("--drop-contains", type=_parse_csv_list, default=list(BASELINE_DROP_CONTAINS),
@@ -140,6 +172,30 @@ def build_argparser() -> argparse.ArgumentParser:
         choices=["full", "future"],
         default=FULL_FEATURE_PROFILE,
         help="Training feature profile: full=standard baseline, future=priors-only future mode",
+    )
+    ap.add_argument(
+        "--train-recency-half-life",
+        type=float,
+        default=None,
+        help=(
+            "Optional train-time race recency half-life. "
+            f"Default: disabled for {FULL_FEATURE_PROFILE}, {FUTURE_TRAIN_RECENCY_HALF_LIFE:g} for {FUTURE_FEATURE_PROFILE}."
+        ),
+    )
+    ap.add_argument(
+        "--use-regulation-era-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply regulation-era race weights on top of recency weighting.",
+    )
+    ap.add_argument(
+        "--era-weights",
+        type=_parse_float_mapping,
+        default={},
+        help=(
+            "Optional era weight overrides, e.g. "
+            '"next_gen_2026=1.0,ground_effect=0.75,wide_aero_hybrid=0.5,aero_kers=0.18"'
+        ),
     )
     return ap
 
@@ -168,11 +224,18 @@ def from_args(args: Optional[argparse.Namespace] = None) -> TrainConfig:
         device=str(ns.device),
         log_every=int(ns.log_every),
         dnf_position=int(ns.dnf_position),
+        dsq_position=int(ns.dsq_position),
+        status_loss_weight=float(ns.status_loss_weight),
         drop_prefixes=list(ns.drop_prefixes or []),
         drop_contains=list(ns.drop_contains or []),
         drop_cols=list(ns.drop_cols or []),
         keep_prefixes=list(ns.keep_prefixes or []),
         feature_profile=str(ns.feature_profile),
+        train_recency_half_life=(
+            None if ns.train_recency_half_life is None else float(ns.train_recency_half_life)
+        ),
+        use_regulation_era_weights=bool(ns.use_regulation_era_weights),
+        era_weights=dict(ns.era_weights or {}),
     )
 
                                                        

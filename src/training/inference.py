@@ -24,6 +24,8 @@ from .featureset import (
     select_feature_cols,
     transform_with_scaler_df,
 )
+from .models.race_outcome_ranker import make_model as make_race_outcome_ranker
+from .outcomes import OUTCOME_LABELS, outcome_priority
 
                                                                                        
                                             
@@ -89,7 +91,16 @@ def load_artifacts(
             in_dim = int(meta.get("in_dim", len(feature_cols)))
             hidden = list(map(int, meta.get("hidden", [256, 128])))
             dropout = float(meta.get("dropout", 0.1))
-            make_model = lambda _: _DefaultMLP(in_dim, hidden, dropout)  # noqa: E731
+            num_status_classes = int(meta.get("num_status_classes", 0))
+            if num_status_classes > 0 or str(meta.get("target_mode", "")).strip().lower() == "multitask_finish_dnf_dsq":
+                make_model = lambda _: make_race_outcome_ranker(  # noqa: E731
+                    in_dim=in_dim,
+                    hidden=hidden,
+                    dropout=dropout,
+                    num_status_classes=num_status_classes,
+                )
+            else:
+                make_model = lambda _: _DefaultMLP(in_dim, hidden, dropout)  # noqa: E731
         try:
             obj = torch.load(pt_path, map_location=dev)
         except Exception as e:  # pragma: no cover
@@ -138,6 +149,20 @@ class _DefaultMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:                  
         out = self.net(x)
         return out.squeeze(-1)
+
+
+def _unpack_model_output(output: Any) -> tuple[Any, Any | None]:
+    if isinstance(output, dict):
+        rank_scores = output.get("rank_scores")
+        status_logits = output.get("status_logits")
+        if rank_scores is None:
+            raise ValueError("Model output dict must contain 'rank_scores'")
+        return rank_scores, status_logits
+    if isinstance(output, (list, tuple)):
+        if not output:
+            raise ValueError("Model returned an empty tuple/list")
+        return output[0], (output[1] if len(output) > 1 else None)
+    return output, None
 
 
                                                                                        
@@ -208,6 +233,64 @@ def _softmax_stable(x: np.ndarray) -> np.ndarray:
     return (z / s).astype(np.float32)
 
 
+def _softmax_rows(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError("Expected a 2D array for row-wise softmax")
+    shifted = arr - np.max(arr, axis=1, keepdims=True)
+    exp_vals = np.exp(shifted)
+    denom = exp_vals.sum(axis=1, keepdims=True)
+    denom = np.where(denom > 0, denom, 1.0)
+    return (exp_vals / denom).astype(np.float32)
+
+
+def _group_keys(df: pd.DataFrame, by: Sequence[str] | None) -> list[np.ndarray]:
+    if by is None:
+        return [df.index.to_numpy(dtype=int)]
+    cols = [col for col in list(by) if col in df.columns]
+    if not cols:
+        return [df.index.to_numpy(dtype=int)]
+    return [np.asarray(idx, dtype=int) for _, idx in df.groupby(cols, sort=False).indices.items()]
+
+
+def _groupwise_rank_component(scores: np.ndarray, df: pd.DataFrame, by: Sequence[str] | None) -> np.ndarray:
+    out = np.zeros(len(scores), dtype=np.float32)
+    for idx in _group_keys(df, by):
+        vals = scores[idx].astype(np.float32, copy=False)
+        if vals.size <= 1:
+            out[idx] = 0.0
+            continue
+        mu = float(vals.mean())
+        sigma = float(vals.std())
+        if not np.isfinite(sigma) or sigma < 1e-6:
+            out[idx] = vals - mu
+        else:
+            out[idx] = np.clip((vals - mu) / sigma, -3.0, 3.0)
+    return out
+
+
+def _predict_model_outputs(
+    artifacts: Artifacts,
+    df: pd.DataFrame,
+    feature_cols: Optional[Sequence[str]] = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    fcols = list(feature_cols or artifacts.feature_cols)
+    Xs = transform_with_scaler_df(df, fcols, artifacts.scaler, as_array=True)
+
+    if not (_HAS_TORCH and artifacts.model is not None):
+        return np.zeros(Xs.shape[0], dtype=np.float32), None
+
+    x = torch.from_numpy(Xs).to(artifacts.device)
+    with torch.no_grad():
+        output = artifacts.model(x)
+    rank_scores, status_logits = _unpack_model_output(output)
+    rank_np = rank_scores.detach().float().cpu().numpy().reshape(-1)
+    status_np = None
+    if status_logits is not None:
+        status_np = status_logits.detach().float().cpu().numpy()
+    return rank_np, status_np
+
+
 def predict_scores(
     artifacts: Artifacts,
     df: pd.DataFrame,
@@ -216,19 +299,8 @@ def predict_scores(
     """Возвращает сырые `scores` формы [N]. Если модели нет — нули.
     Использует порядок колонок из artifacts.feature_cols по умолчанию.
     """
-    fcols = list(feature_cols or artifacts.feature_cols)
-    Xs = transform_with_scaler_df(df, fcols, artifacts.scaler, as_array=True)
-
-    if not (_HAS_TORCH and artifacts.model is not None):
-        return np.zeros(Xs.shape[0], dtype=np.float32)
-
-    x = torch.from_numpy(Xs).to(artifacts.device)
-    with torch.no_grad():
-        out = artifacts.model(x)
-        if isinstance(out, (list, tuple)):
-            out = out[0]
-    s = out.detach().float().cpu().numpy().reshape(-1)
-    return s
+    rank_scores, _ = _predict_model_outputs(artifacts, df, feature_cols=feature_cols)
+    return rank_scores
 
 
 def attach_win_probs(
@@ -308,12 +380,42 @@ def predict_custom(
     - by: группировка для softmax/ранжирования (по умолчанию по гонкам).
     - ascending: если True — меньший score лучше.
     """
+    features_df = features_df.reset_index(drop=True).copy()
     temp = float(temperature if temperature is not None else artifacts.meta.get("temperature", 1.0))
+    rank_scores, status_logits = _predict_model_outputs(artifacts, features_df)
 
-    s = predict_scores(artifacts, features_df)
-    df_sc = attach_win_probs(features_df, s, by=by, temperature=temp) if include_probs else (
-        features_df.assign(score=s)
-    )
+    if status_logits is None:
+        df_sc = attach_win_probs(features_df, rank_scores, by=by, temperature=temp) if include_probs else (
+            features_df.assign(score=rank_scores)
+        )
+        rank_df = make_ranking_df(df_sc, by=by, ascending=ascending)
+        return rank_df
+
+    df_sc = features_df.copy()
+    labels = [str(label) for label in artifacts.meta.get("outcome_labels", list(OUTCOME_LABELS))]
+    if len(labels) != int(status_logits.shape[1]):
+        labels = list(OUTCOME_LABELS[: status_logits.shape[1]])
+        if len(labels) < int(status_logits.shape[1]):
+            labels.extend(f"class_{idx}" for idx in range(len(labels), int(status_logits.shape[1])))
+    probs = _softmax_rows(status_logits)
+    for idx, label in enumerate(labels):
+        df_sc[f"p_{label}"] = probs[:, idx]
+    pred_idx = probs.argmax(axis=1)
+    df_sc["predicted_outcome"] = [labels[int(idx)] for idx in pred_idx]
+    df_sc["score_rank"] = rank_scores.astype(np.float32)
+    df_sc["score_status"] = probs @ outcome_priority(labels).to_numpy(dtype=np.float32)
+    df_sc["score"] = (
+        10.0 * df_sc["score_status"].to_numpy(dtype=np.float32)
+        + _groupwise_rank_component(rank_scores, features_df, by)
+    ).astype(np.float32)
+
+    if include_probs:
+        p_finish = df_sc.get("p_finish")
+        finish_prob = p_finish.to_numpy(dtype=np.float32) if p_finish is not None else np.ones(len(df_sc), dtype=np.float32)
+        win_logits = rank_scores + np.log(np.clip(finish_prob, 1e-6, 1.0))
+        pwin_df = attach_win_probs(features_df.copy(), win_logits, by=by, temperature=temp)
+        df_sc["p_win"] = pwin_df["p_win"].to_numpy(dtype=np.float32)
+
     rank_df = make_ranking_df(df_sc, by=by, ascending=ascending)
     return rank_df
 

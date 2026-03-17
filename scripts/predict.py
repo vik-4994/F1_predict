@@ -114,17 +114,29 @@ def fmt_percent(x: float) -> str:
 def pretty_print_table(df: pd.DataFrame, topk: int, cols_mode: str = "mini") -> None:
     show = df.iloc[:topk].copy()
     if cols_mode == "mini":
-        cols = [c for c in ("rank", "Driver", "year", "round", "score", "p_win") if c in show.columns]
-        show = show[cols].rename(columns={"rank": "pos"})
-        show["p_win_%"] = show["p_win"].astype(float).map(fmt_percent)
-        show = show.drop(columns=["p_win"])
-    with pd.option_context("display.max_rows", None, "display.max_columns", None):
-        print(" pos Driver  year  round     score p_win_%")
-        for _, row in show.iterrows():
-            print(
-                f"{int(row['pos']):4d} {str(row['Driver']):>5s}  {int(row['year']):4d} {int(row['round']):6d}  "
-                f"{float(row['score']):10.6f}   {str(row['p_win_%']):>5s}"
+        cols = [
+            c
+            for c in (
+                "rank",
+                "Driver",
+                "year",
+                "round",
+                "predicted_outcome",
+                "p_finish",
+                "p_dnf",
+                "p_dsq",
+                "score",
+                "p_win",
             )
+            if c in show.columns
+        ]
+        show = show[cols].rename(columns={"rank": "pos"})
+        for prob_col in ("p_finish", "p_dnf", "p_dsq", "p_win"):
+            if prob_col in show.columns:
+                show[f"{prob_col}_%"] = show[prob_col].astype(float).map(fmt_percent)
+                show = show.drop(columns=[prob_col])
+    with pd.option_context("display.max_rows", None, "display.max_columns", None):
+        print(show.to_string(index=False))
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -251,13 +263,32 @@ def _apply_grid_weight(
 
     df = rank_df.copy()
     df["__grid_pos__"] = df["Driver"].map(grid_map).fillna(10.0)
-    df["score"] = df["score"] - float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
+    penalty = float(grid_weight) * float(beta) * (df["__grid_pos__"] - 1.0)
+    base_rank_col = "score_rank" if "score_rank" in df.columns else "score"
+    df[base_rank_col] = df[base_rank_col] - penalty
 
     gb = list(groupby) if groupby else []
     if gb and all(col in df.columns for col in gb):
         def _recalc(group: pd.DataFrame) -> pd.DataFrame:
             group = group.copy()
-            p = _softmax_stable(group["score"].to_numpy(dtype=np.float64), tau=float(tau))
+            if "score_status" in group.columns and "score_rank" in group.columns:
+                rank_vals = group["score_rank"].to_numpy(dtype=np.float64)
+                centered = rank_vals - rank_vals.mean()
+                sigma = rank_vals.std()
+                if sigma > 1e-6:
+                    centered = np.clip(centered / sigma, -3.0, 3.0)
+                group["score"] = group["score_status"].to_numpy(dtype=np.float64) * 10.0 + centered
+                if "p_finish" in group.columns:
+                    p = _softmax_stable(
+                        group["score_rank"].to_numpy(dtype=np.float64)
+                        + np.log(np.clip(group["p_finish"].to_numpy(dtype=np.float64), 1e-6, 1.0)),
+                        tau=float(tau),
+                    )
+                else:
+                    p = _softmax_stable(group["score"].to_numpy(dtype=np.float64), tau=float(tau))
+            else:
+                group["score"] = group[base_rank_col].to_numpy(dtype=np.float64)
+                p = _softmax_stable(group["score"].to_numpy(dtype=np.float64), tau=float(tau))
             group["p_win"] = p.astype(np.float32)
             group = group.sort_values("score", ascending=False)
             group["rank"] = np.arange(1, len(group) + 1, dtype=np.int32)
@@ -266,7 +297,24 @@ def _apply_grid_weight(
         chunks = [_recalc(df.loc[idx]) for _, idx in df.groupby(gb, sort=False).indices.items()]
         df = pd.concat(chunks, axis=0, ignore_index=False) if chunks else df.iloc[0:0].copy()
     else:
-        p = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
+        if "score_status" in df.columns and "score_rank" in df.columns:
+            rank_vals = df["score_rank"].to_numpy(dtype=np.float64)
+            centered = rank_vals - rank_vals.mean()
+            sigma = rank_vals.std()
+            if sigma > 1e-6:
+                centered = np.clip(centered / sigma, -3.0, 3.0)
+            df["score"] = df["score_status"].to_numpy(dtype=np.float64) * 10.0 + centered
+            if "p_finish" in df.columns:
+                p = _softmax_stable(
+                    df["score_rank"].to_numpy(dtype=np.float64)
+                    + np.log(np.clip(df["p_finish"].to_numpy(dtype=np.float64), 1e-6, 1.0)),
+                    tau=float(tau),
+                )
+            else:
+                p = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
+        else:
+            df["score"] = df[base_rank_col].to_numpy(dtype=np.float64)
+            p = _softmax_stable(df["score"].to_numpy(dtype=np.float64), tau=float(tau))
         df["p_win"] = p.astype(np.float32)
         df = df.sort_values("score", ascending=False)
         df["rank"] = np.arange(1, len(df) + 1, dtype=np.int32)
